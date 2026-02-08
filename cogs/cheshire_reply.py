@@ -8,6 +8,9 @@ from discord import app_commands
 # TRIGGERS
 # ─────────────────────────────────────────────
 
+# 0) Lea "wolf" trigger (any text channel)
+TRIGGER_LEA_WOLF = re.compile(r"\blea\s+is\s+a\s+wolf\b", re.IGNORECASE)
+
 # 1) Classic Cheshire text trigger
 TRIGGER_MAD = re.compile(r"\beveryone is mad here\b", re.IGNORECASE)
 
@@ -42,6 +45,8 @@ TRIGGER_PARADE = re.compile(r"\b(black\s+parade|parade)\b", re.IGNORECASE)
 # RESPONSES
 # ─────────────────────────────────────────────
 
+LEA_REPLY = "No, Lea is a kitty cat"
+
 # Zyphie roast lines – only used when HONEST_USER_ID talks in HONEST_CHANNEL_IDS
 ZYPHIE_LINES: list[str] = [
     "Zyphie, imma be honest, even Wonderland’s tired of that opener.",
@@ -52,18 +57,7 @@ ZYPHIE_LINES: list[str] = [
 ]
 
 # Black Parade lyric slots – fill these with your own lyric chunks locally.
-# (Split the song into several shorter segments and paste each as a string.)
 PARADE_SNIPPETS: list[str] = [
-    # Example structure – REPLACE these with your actual lyric segments:
-    # "Would you be the savior of the broken,\n"
-    # "The beaten and the damned?\n"
-    # "Sometimes I get the feelin’ she's watchin’ over me…",
-    #
-    # "We’ll carry on, we’ll carry on,\n"
-    # "and though you’re dead and gone, believe me,\n"
-    # "your memory will carry on…",
-    #
-    # etc.
     "When the drums hit, the parade starts in your chest.",
     "We’ll carry on — even if the world refuses to get the memo.",
     "Give a cheer for all the broken; this anthem was always for you.",
@@ -90,7 +84,16 @@ class CheshireReply(commands.Cog):
         content = (message.content or "").strip()
         channel = message.channel
 
+        # Only respond in guild text channels
         if not isinstance(channel, discord.TextChannel):
+            return
+
+        # 0) Lea "wolf" trigger (ANY channel)
+        if TRIGGER_LEA_WOLF.search(content):
+            try:
+                await channel.send(LEA_REPLY)
+            except discord.Forbidden:
+                pass
             return
 
         # 1) Classic Cheshire trigger: "everyone is mad here" → "I agree."
@@ -102,7 +105,7 @@ class CheshireReply(commands.Cog):
                 pass
             return
 
-        # 2) Zyphie "imma be honest" roast
+        # 2) Zyphie "imma be honest" roast (only in configured channels)
         if (
             message.author.id == HONEST_USER_ID
             and channel.id in HONEST_CHANNEL_IDS
@@ -128,7 +131,9 @@ class CheshireReply(commands.Cog):
     # Tiny test slash command (kept from original file)
     @app_commands.command(name="cheshire", description="Test that the Cheshire cog is loaded")
     async def cheshire(self, interaction: discord.Interaction):
-        await interaction.response.send_message("The Cheshire cog is loaded. 🐱", ephemeral=True)
+        await interaction.response.send_message(
+            "The Cheshire cog is loaded. 🐱", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot):
