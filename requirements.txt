@@ -1,0 +1,6 @@
+discord.py>=2.4
+aiohttp
+beautifulsoup4
+openai>=1.42
+yt-dlp
+aiohttp

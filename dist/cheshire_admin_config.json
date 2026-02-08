@@ -1,0 +1,6 @@
+{
+  "project_path": "C:\\Users\\Cookiechan\\OneDrive\\Desktop\\FC Bot",
+  "deploy_command": "deploy.bat",
+  "birthdays_api_url": "https://splendid-wholeness-production-cf28.up.railway.app/api/birthdays",
+  "birthdays_api_token": "f9d39a3b1b848a0fbd832ab71e4d9c12"
+}
