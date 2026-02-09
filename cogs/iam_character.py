@@ -18,17 +18,12 @@ LOG = logging.getLogger(__name__)
 DB_PATH = "data/iam_characters.json"
 WEBHOOK_NAME = "Cheshire Character Card"
 
-# XIV Character Cards service (PNG cards)
-# Docs: https://xivapi.github.io/XIV-Character-Cards/
-CHAR_CARD_BASE_URL = "https://xiv-character-cards.drakon.cloud"
+# Allow self-hosting / changing provider without code edits
+CHAR_CARD_BASE_URL = os.getenv("CHAR_CARD_BASE_URL", "https://xiv-character-cards.drakon.cloud")
 HTTP_TIMEOUT_S = 20
 
 ID_FROM_URL_RE = re.compile(r"/characters/id/(\d+)\.png")
 
-
-# ───────────────────────────────────────────────────────────────────
-# tiny JSON store
-# ───────────────────────────────────────────────────────────────────
 
 def _load_db() -> dict[str, Any]:
     try:
@@ -54,7 +49,7 @@ def _save_db(data: dict[str, Any]) -> None:
 class StoredChar:
     name: str
     world: str
-    lodestone_id: Optional[int] = None  # preferred (fast)
+    lodestone_id: Optional[int] = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "StoredChar":
@@ -71,12 +66,9 @@ class StoredChar:
         return out
 
 
-# ───────────────────────────────────────────────────────────────────
-# Card URLs
-# ───────────────────────────────────────────────────────────────────
-
 def _card_url_by_id(lodestone_id: int, lang: str = "en") -> str:
     return f"{CHAR_CARD_BASE_URL}/characters/id/{lodestone_id}.png?lang={quote(lang, safe='')}"
+
 
 def _prepare_url_by_name(world: str, name: str) -> str:
     w = quote(world.strip(), safe="")
@@ -84,26 +76,21 @@ def _prepare_url_by_name(world: str, name: str) -> str:
     return f"{CHAR_CARD_BASE_URL}/prepare/name/{w}/{n}"
 
 
-# ───────────────────────────────────────────────────────────────────
-# API helpers
-# ───────────────────────────────────────────────────────────────────
+def _lodestone_search_url(world: str, name: str) -> str:
+    # Simple, reliable fallback: user can click and confirm identity
+    return (
+        "https://na.finalfantasyxiv.com/lodestone/character/"
+        f"?q={quote(name.strip())}&worldname={quote(world.strip())}"
+    )
+
 
 async def _prepare_card_for_name(session: aiohttp.ClientSession, *, world: str, name: str) -> dict[str, Any]:
-    """
-    Calls /prepare/name/<WORLD>/<CHARACTER NAME>
-    Per docs, this returns JSON like:
-      {"status":"ok","url":"/characters/id/123456789.png"}
-    or a non-ok status if it’s still generating.
-    """
     url = _prepare_url_by_name(world, name)
     async with session.get(url) as r:
         text = await r.text()
         if r.status != 200:
             raise RuntimeError(f"Card API {r.status}: {text[:200]}")
-        try:
-            return await r.json()
-        except Exception as e:
-            raise RuntimeError(f"Card API returned non-JSON: {text[:200]}") from e
+        return await r.json()
 
 
 def _try_extract_id(prep_json: dict[str, Any]) -> Optional[int]:
@@ -116,20 +103,17 @@ def _try_extract_id(prep_json: dict[str, Any]) -> Optional[int]:
     return int(m.group(1))
 
 
-# ───────────────────────────────────────────────────────────────────
-# Embed rendering
-# ───────────────────────────────────────────────────────────────────
-
 def build_character_embed(stored: StoredChar, *, requested_by: Optional[discord.Member] = None) -> discord.Embed:
-    title = f"{stored.name} — {stored.world}"
-    em = discord.Embed(title=title, color=discord.Color.dark_teal())
+    em = discord.Embed(
+        title=f"{stored.name} — {stored.world}",
+        color=discord.Color.dark_teal(),
+    )
 
     if stored.lodestone_id:
-        img = _card_url_by_id(stored.lodestone_id, lang="en")
-        em.set_image(url=img)
+        em.set_image(url=_card_url_by_id(stored.lodestone_id, lang="en"))
         em.description = "Character card generated from Lodestone data."
     else:
-        em.description = "Card is still preparing. Try again in a moment."
+        em.description = "Card not cached yet."
 
     if requested_by:
         em.set_author(
@@ -137,17 +121,11 @@ def build_character_embed(stored: StoredChar, *, requested_by: Optional[discord.
             icon_url=requested_by.display_avatar.url,
         )
 
-    em.set_footer(text="Source: XIV Character Cards")
+    em.set_footer(text="Source: Character Cards (or fallback to Lodestone)")
     return em
 
 
-# ───────────────────────────────────────────────────────────────────
-# Cog
-# ───────────────────────────────────────────────────────────────────
-
 class IAmCharacter(commands.Cog):
-    """Store a user's FFXIV character and show a quick card."""
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._db = _load_db()
@@ -183,13 +161,7 @@ class IAmCharacter(commands.Cog):
             _save_db(self._db)
         return existed
 
-    async def _send_card(self, ctx: commands.Context, embed: discord.Embed, image_url: Optional[str] = None) -> None:
-        """
-        Webhook preferred. Also include the image URL as message content (when available)
-        so Discord has an easier time previewing/caching it.
-        """
-        content = image_url or None
-
+    async def _send_card(self, ctx: commands.Context, embed: discord.Embed, content: Optional[str] = None) -> None:
         channel = ctx.channel
         if isinstance(channel, discord.TextChannel):
             perms = channel.permissions_for(channel.guild.me) if channel.guild and channel.guild.me else None
@@ -209,48 +181,48 @@ class IAmCharacter(commands.Cog):
                     return
                 except Exception:
                     LOG.exception("Webhook send failed; falling back to normal send")
-
         await ctx.send(content=content, embed=embed)
-
-    # ── Commands ──────────────────────────────────────────────────
 
     @commands.command(name="iam")
     async def iam(self, ctx: commands.Context, *args: str):
-        """
-        !iam <First Last> <World>
-        Example: !iam Cookie Chan Ragnarok
-        """
         if ctx.guild is None:
             return await ctx.send("This command only works in the server.")
-
         if len(args) < 2:
             return await ctx.send("Usage: `!iam <First Last> <World>` (world is the last word).")
 
         world = args[-1].strip()
         name = " ".join(args[:-1]).strip()
 
+        stored = StoredChar(name=name, world=world, lodestone_id=None)
+        self._set_stored(ctx.guild.id, ctx.author.id, stored)
+
         session = await self._session_get()
         try:
             prep = await _prepare_card_for_name(session, world=world, name=name)
-        except Exception as e:
+            lodestone_id = _try_extract_id(prep)
+            if lodestone_id:
+                stored.lodestone_id = lodestone_id
+                self._set_stored(ctx.guild.id, ctx.author.id, stored)
+                em = build_character_embed(stored)
+                return await self._send_card(ctx, em, content=_card_url_by_id(lodestone_id, "en"))
+        except aiohttp.ClientConnectorError as e:
+            # DNS/down → fallback to Lodestone search
+            LOG.exception("Card host unreachable")
+            link = _lodestone_search_url(world, name)
+            em = discord.Embed(
+                title=f"{name} — {world}",
+                description="Card host is unreachable right now. Here’s a Lodestone search link instead.",
+                color=discord.Color.dark_teal(),
+            )
+            em.add_field(name="Lodestone search", value=link, inline=False)
+            return await ctx.send(embed=em)
+        except Exception:
             LOG.exception("Card prepare failed")
-            return await ctx.send(f"Couldn’t generate the card right now: `{e}`")
 
-        lodestone_id = _try_extract_id(prep)
-        stored = StoredChar(name=name, world=world, lodestone_id=lodestone_id)
-        self._set_stored(ctx.guild.id, ctx.author.id, stored)
-
-        if not lodestone_id:
-            # Not ready yet; ask user to retry (Discord-friendly approach).
-            return await ctx.send("I’m brewing your card. Try `!whoami` again in ~10–20 seconds.")
-
-        img = _card_url_by_id(lodestone_id, lang="en")
-        em = build_character_embed(stored)
-        await self._send_card(ctx, em, image_url=img)
+        return await ctx.send("I couldn’t cache the card yet. Try `!whoami` again in a bit.")
 
     @commands.command(name="whoami")
     async def whoami(self, ctx: commands.Context, member: Optional[discord.Member] = None):
-        """!whoami [@user] — show the saved character card."""
         if ctx.guild is None:
             return await ctx.send("This command only works in the server.")
 
@@ -261,30 +233,42 @@ class IAmCharacter(commands.Cog):
                 return await ctx.send("You haven’t set a character yet. Use `!iam <First Last> <World>`.")
             return await ctx.send("That user hasn’t set a character yet.")
 
-        if not stored.lodestone_id:
-            # Try preparing again using stored name/world
-            session = await self._session_get()
-            try:
-                prep = await _prepare_card_for_name(session, world=stored.world, name=stored.name)
-                lodestone_id = _try_extract_id(prep)
-                if lodestone_id:
-                    stored.lodestone_id = lodestone_id
-                    self._set_stored(ctx.guild.id, target.id, stored)
-            except Exception:
-                LOG.exception("Re-prepare failed for %s / %s", stored.world, stored.name)
+        # If we already have an ID, embed the stable image URL
+        if stored.lodestone_id:
+            em = build_character_embed(stored, requested_by=ctx.author)
+            return await self._send_card(ctx, em, content=_card_url_by_id(stored.lodestone_id, "en"))
+
+        # Otherwise, try preparing again; if host unreachable, fallback link
+        session = await self._session_get()
+        try:
+            prep = await _prepare_card_for_name(session, world=stored.world, name=stored.name)
+            lodestone_id = _try_extract_id(prep)
+            if lodestone_id:
+                stored.lodestone_id = lodestone_id
+                self._set_stored(ctx.guild.id, target.id, stored)
+                em = build_character_embed(stored, requested_by=ctx.author)
+                return await self._send_card(ctx, em, content=_card_url_by_id(lodestone_id, "en"))
+        except aiohttp.ClientConnectorError:
+            link = _lodestone_search_url(stored.world, stored.name)
+            em = discord.Embed(
+                title=f"{stored.name} — {stored.world}",
+                description="Card host is unreachable right now. Here’s a Lodestone search link instead.",
+                color=discord.Color.dark_teal(),
+            )
+            em.add_field(name="Lodestone search", value=link, inline=False)
+            return await ctx.send(embed=em)
+        except Exception:
+            LOG.exception("Re-prepare failed for %s / %s", stored.world, stored.name)
 
         em = build_character_embed(stored, requested_by=ctx.author)
-
-        img = _card_url_by_id(stored.lodestone_id, lang="en") if stored.lodestone_id else None
-        await self._send_card(ctx, em, image_url=img)
+        return await self._send_card(ctx, em)
 
     @commands.command(name="forgetme")
     async def forgetme(self, ctx: commands.Context):
-        """!forgetme — delete your stored character."""
         if ctx.guild is None:
             return await ctx.send("This command only works in the server.")
         if self._del_stored(ctx.guild.id, ctx.author.id):
-            return await ctx.send("Erased. The Cat has ‘forgotten’ you. 🐾")
+            return await ctx.send("Erased. 🐾")
         return await ctx.send("Nothing to forget.")
 
 

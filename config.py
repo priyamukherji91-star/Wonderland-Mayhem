@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 import os
-from typing import Final, Optional, Set, List
+from typing import Final, Optional, Set
 
 # ─────────────────────────────────────────────
 # GUILD / TIMEZONE
 # ─────────────────────────────────────────────
 
-# Your main server
 GUILD_ID: Final[int] = 1251693839249313863
-
-# Server time (used by birthdays, duties, etc.)
 ST_TIMEZONE: Final[str] = "Europe/Luxembourg"
 
 # ─────────────────────────────────────────────
@@ -32,9 +29,11 @@ BIRTHDAY_STAFF_CHANNEL_ID: Final[int] = 1251693839962607675
 
 MODLOG_CHANNEL_ID: Optional[int] = None
 
-# Channels where the link-fix feature is active
-# (keep empty if unrestricted or unused)
-LINKFIX_CHANNEL_IDS: Final[List[int]] = []
+# Used by bot.py (prevents startup crash if missing)
+LINKFIX_CHANNEL_IDS: Final[list[int]] = []
+
+# Used by cogs/autoclean.py (prevents extension load failure)
+AUTO_CLEAN_EXEMPT_CHANNEL_IDS: Final[list[int]] = []
 
 # ─────────────────────────────────────────────
 # ROLE IDS / NAMES
@@ -50,24 +49,20 @@ ADMIN_ROLE_NAMES: Final[Set[str]] = {
 DOOMED_RABBIT_ROLE_NAME: Final[str] = "Doomed Rabbit"
 MADNESS_WARDEN_ROLE_NAME: Final[str] = "Madness Warden"
 
-# Used by permissions helpers
 MOD_ROLE_NAMES: Final[tuple[str, ...]] = (
     *tuple(ADMIN_ROLE_NAMES),
     DOOMED_RABBIT_ROLE_NAME,
     MADNESS_WARDEN_ROLE_NAME,
 )
 
-# FC / Friend roles
 FC_ROLE_NAME: Final[str] = "Hatter’s Strays"
 FRIEND_ROLE_NAME: Final[str] = "Tea Party VIP"
 
-# Roles allowed to use the fools gallery
 FOOLS_ALLOWED_ROLE_NAMES: Final[tuple[str, ...]] = (
     FC_ROLE_NAME,
     FRIEND_ROLE_NAME,
 )
 
-# Gender / pronoun roles
 GENDER_ROLE_IDS: Final[dict[str, int]] = {
     "She/Her": 1441330743589736549,
     "They/Them": 1441330775378100234,
@@ -75,12 +70,9 @@ GENDER_ROLE_IDS: Final[dict[str, int]] = {
 }
 
 # ─────────────────────────────────────────────
-# XIVAPI (character cards / !iam)
+# XIVAPI (kept for compatibility / future use)
 # ─────────────────────────────────────────────
 
 XIVAPI_BASE_URL: Final[str] = "https://xivapi.com"
-
-# Optional: set as environment variable for higher rate limits
 XIVAPI_PRIVATE_KEY: Optional[str] = os.getenv("XIVAPI_PRIVATE_KEY")
-
 XIVAPI_TIMEOUT_SECONDS: Final[int] = 15
