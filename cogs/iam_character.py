@@ -6,22 +6,19 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
+from urllib.parse import quote
 
-import aiohttp
 import discord
 from discord.ext import commands
-
-import config
 
 LOG = logging.getLogger(__name__)
 
 DB_PATH = "data/iam_characters.json"
 WEBHOOK_NAME = "Cheshire Character Card"
 
-# XIVAPI v1 base (character/lodestone endpoints live here)
-XIVAPI_BASE_URL = getattr(config, "XIVAPI_BASE_URL", "https://xivapi.com")
-XIVAPI_PRIVATE_KEY = getattr(config, "XIVAPI_PRIVATE_KEY", None)
-HTTP_TIMEOUT_S = getattr(config, "XIVAPI_TIMEOUT_SECONDS", 15)
+# XIV Character Cards service (PNG cards)
+# Docs: https://xivapi.github.io/XIV-Character-Cards/
+CHAR_CARD_BASE_URL = "https://xiv-character-cards.drakon.cloud"
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -50,132 +47,46 @@ def _save_db(data: dict[str, Any]) -> None:
 
 @dataclass
 class StoredChar:
-    lodestone_id: int
     name: str
-    server: str
-    avatar: Optional[str] = None
+    world: str
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "StoredChar":
         return cls(
-            lodestone_id=int(d["lodestone_id"]),
             name=str(d["name"]),
-            server=str(d["server"]),
-            avatar=d.get("avatar"),
+            world=str(d["world"]),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "lodestone_id": self.lodestone_id,
-            "name": self.name,
-            "server": self.server,
-            "avatar": self.avatar,
-        }
+        return {"name": self.name, "world": self.world}
 
 
-# ───────────────────────────────────────────────────────────────────
-# XIVAPI calls
-# ───────────────────────────────────────────────────────────────────
-
-async def _xivapi_get_json(session: aiohttp.ClientSession, path: str, params: dict[str, str]) -> dict[str, Any]:
-    url = f"{XIVAPI_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
-    if XIVAPI_PRIVATE_KEY:
-        # XIVAPI commonly accepts developer keys as `private_key` query param. :contentReference[oaicite:3]{index=3}
-        params = {**params, "private_key": str(XIVAPI_PRIVATE_KEY)}
-
-    async with session.get(url, params=params) as r:
-        txt = await r.text()
-        if r.status != 200:
-            raise RuntimeError(f"XIVAPI {r.status}: {txt[:300]}")
-        try:
-            return await r.json()
-        except Exception as e:
-            raise RuntimeError(f"XIVAPI returned non-JSON: {txt[:300]}") from e
+def build_card_url_by_name(world: str, name: str, lang: str = "en") -> str:
+    # Endpoint: /characters/name/<WORLD>/<CHARACTER NAME>.png?lang=en
+    # Name + world must be URL encoded.
+    w = quote(world.strip(), safe="")
+    n = quote(name.strip(), safe="")
+    return f"{CHAR_CARD_BASE_URL}/characters/name/{w}/{n}.png?lang={quote(lang, safe='')}"
 
 
-async def xivapi_character_search(session: aiohttp.ClientSession, *, name: str, server: str) -> StoredChar:
-    # Character search flow is the standard way: search(name, server) -> get ID. :contentReference[oaicite:4]{index=4}
-    data = await _xivapi_get_json(
-        session,
-        "/character/search",
-        {"name": name, "server": server},
-    )
-
-    results = data.get("Results") or data.get("results") or []
-    if not results:
-        raise LookupError("No character found for that name/server.")
-
-    first = results[0]
-    lodestone_id = int(first.get("ID") or first.get("id"))
-    return StoredChar(
-        lodestone_id=lodestone_id,
-        name=str(first.get("Name") or first.get("name") or name),
-        server=str(first.get("Server") or first.get("server") or server),
-        avatar=first.get("Avatar") or first.get("avatar"),
-    )
-
-
-async def xivapi_character_profile(session: aiohttp.ClientSession, lodestone_id: int) -> dict[str, Any]:
-    # Fetch a profile by ID; libraries typically expose this as character(id, all_data: true). :contentReference[oaicite:5]{index=5}
-    return await _xivapi_get_json(
-        session,
-        f"/character/{lodestone_id}",
-        {"data": "AC,FC"},  # active class/job + free company (best-effort)
-    )
-
-
-# ───────────────────────────────────────────────────────────────────
-# rendering
-# ───────────────────────────────────────────────────────────────────
-
-def _safe_get(d: dict[str, Any], *keys: str) -> Optional[Any]:
-    cur: Any = d
-    for k in keys:
-        if not isinstance(cur, dict) or k not in cur:
-            return None
-        cur = cur[k]
-    return cur
-
-
-def build_character_embed(stored: StoredChar, profile: Optional[dict[str, Any]]) -> discord.Embed:
-    char = (profile or {}).get("Character") or {}
-    name = char.get("Name") or stored.name
-    server = char.get("Server") or stored.server
-
-    title = char.get("Title")
-    fc_name = _safe_get(profile or {}, "FreeCompany", "Name")
-
-    acj = char.get("ActiveClassJob") or {}
-    job = acj.get("Job") or {}
-    job_name = job.get("Name") or job.get("Abbreviation") or None
-    job_level = acj.get("Level")
-
-    portrait = char.get("Portrait") or stored.avatar
-    avatar = char.get("Avatar") or stored.avatar
-
+def build_character_embed(stored: StoredChar, *, requested_by: Optional[discord.Member] = None) -> discord.Embed:
     em = discord.Embed(
-        title=f"{name} — {server}",
-        description=(f"**Title:** {title}\n" if title else "")
-        + (f"**Free Company:** {fc_name}\n" if fc_name else "")
-        + (f"**Main job:** {job_name} (Lv {job_level})\n" if job_name and job_level is not None else ""),
+        title=f"{stored.name} — {stored.world}",
         color=discord.Color.dark_teal(),
     )
 
-    em.add_field(name="Lodestone ID", value=str(stored.lodestone_id), inline=True)
-    em.add_field(name="Saved as", value=f"{stored.name} — {stored.server}", inline=True)
+    # Big card image
+    em.set_image(url=build_card_url_by_name(stored.world, stored.name, lang="en"))
 
-    if avatar:
-        em.set_thumbnail(url=avatar)
-    if portrait:
-        em.set_image(url=portrait)
+    if requested_by:
+        em.set_author(
+            name=f"Requested by {requested_by.display_name}",
+            icon_url=requested_by.display_avatar.url,
+        )
 
-    em.set_footer(text="Pulled from XIVAPI / Lodestone.")
+    em.set_footer(text="Character card generated from Lodestone data.")
     return em
 
-
-# ───────────────────────────────────────────────────────────────────
-# Cog
-# ───────────────────────────────────────────────────────────────────
 
 class IAmCharacter(commands.Cog):
     """Store a user's FFXIV character and show a quick card."""
@@ -183,11 +94,6 @@ class IAmCharacter(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._db = _load_db()
-        self._session: Optional[aiohttp.ClientSession] = None
-
-    async def cog_unload(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
 
     def _guild_bucket(self, guild_id: int) -> dict[str, Any]:
         return self._db.setdefault(str(guild_id), {})
@@ -208,18 +114,7 @@ class IAmCharacter(commands.Cog):
             _save_db(self._db)
         return existed
 
-    async def _session_get(self) -> aiohttp.ClientSession:
-        if self._session and not self._session.closed:
-            return self._session
-        timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_S)
-        self._session = aiohttp.ClientSession(timeout=timeout)
-        return self._session
-
     async def _send_card(self, ctx: commands.Context, embed: discord.Embed) -> None:
-        """
-        Prefer a webhook message so it behaves like a “real post”
-        (and won’t get caught by any “delete bot messages” cleanup logic).
-        """
         channel = ctx.channel
         if isinstance(channel, discord.TextChannel):
             perms = channel.permissions_for(channel.guild.me) if channel.guild and channel.guild.me else None
@@ -238,44 +133,27 @@ class IAmCharacter(commands.Cog):
                     return
                 except Exception:
                     LOG.exception("Webhook send failed; falling back to normal send")
-
         await ctx.send(embed=embed)
-
-    # ── Commands ──────────────────────────────────────────────────
 
     @commands.command(name="iam")
     async def iam(self, ctx: commands.Context, *args: str):
         """
-        !iam <First Last> <Server>
-        Example: !iam Raelys Skyborn Behemoth
+        !iam <First Last> <World>
+        Example: !iam Cookie Chan Ragnarok
         """
         if ctx.guild is None:
             return await ctx.send("This command only works in the server.")
 
         if len(args) < 2:
-            return await ctx.send("Usage: `!iam <First Last> <Server>` (server is the last word).")
+            return await ctx.send("Usage: `!iam <First Last> <World>` (world is the last word).")
 
-        server = args[-1]
+        world = args[-1].strip()
         name = " ".join(args[:-1]).strip()
 
-        session = await self._session_get()
-        try:
-            stored = await xivapi_character_search(session, name=name, server=server)
-        except LookupError as e:
-            return await ctx.send(str(e))
-        except Exception as e:
-            LOG.exception("XIVAPI search failed")
-            return await ctx.send(f"Couldn’t reach XIVAPI right now: `{e}`")
-
+        stored = StoredChar(name=name, world=world)
         self._set_stored(ctx.guild.id, ctx.author.id, stored)
 
-        profile = None
-        try:
-            profile = await xivapi_character_profile(session, stored.lodestone_id)
-        except Exception:
-            LOG.info("Profile fetch failed for %s", stored.lodestone_id)
-
-        em = build_character_embed(stored, profile)
+        em = build_character_embed(stored)
         await self._send_card(ctx, em)
 
     @commands.command(name="whoami")
@@ -288,18 +166,10 @@ class IAmCharacter(commands.Cog):
         stored = self._get_stored(ctx.guild.id, target.id)
         if not stored:
             if target.id == ctx.author.id:
-                return await ctx.send("You haven’t set a character yet. Use `!iam <First Last> <Server>`.")
+                return await ctx.send("You haven’t set a character yet. Use `!iam <First Last> <World>`.")
             return await ctx.send("That user hasn’t set a character yet.")
 
-        session = await self._session_get()
-        profile = None
-        try:
-            profile = await xivapi_character_profile(session, stored.lodestone_id)
-        except Exception:
-            LOG.info("Profile fetch failed for %s", stored.lodestone_id)
-
-        em = build_character_embed(stored, profile)
-        em.set_author(name=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
+        em = build_character_embed(stored, requested_by=ctx.author)
         await self._send_card(ctx, em)
 
     @commands.command(name="forgetme")
