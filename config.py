@@ -1,6 +1,7 @@
 # config.py
 from __future__ import annotations
 
+import os
 from typing import Final, Optional, Set
 
 # ─────────────────────────────────────────────
@@ -17,82 +18,39 @@ ST_TIMEZONE: Final[str] = "Europe/Luxembourg"
 # CHANNEL IDS
 # ─────────────────────────────────────────────
 
-# Roles / reaction menus
-ROLES_CHANNEL_ID: Final[int] = 1421819010055671868  # #roles / #pick-your-roles
+GATE_CHANNEL_ID: Final[int] = 1251693839962607675          # #choose-your-door
+HERE_THEN_GONE_CHANNEL_ID: Final[int] = 1251693839962607675  # #here-then-gone (update if different)
+ROLES_CHANNEL_ID: Final[int] = 1251693839962607675         # #pick-your-roles (update if different)
 
-# Giveaways
-GIVEAWAYS_CHANNEL_ID: Final[int] = 1255205422005227602  # #giveaways
+GIVEAWAYS_CHANNEL_ID: Final[int] = 1251693839962607675     # #giveaways (update if different)
 
-# Duty events
-DUTY_EVENTS_CHANNEL_ID: Final[int] = 1261600281293099019  # #duty-events
+FFXIV_WIKI_CHANNEL_ID: Final[int] = 1251693839962607675    # #ffxiv-wiki (update if different)
 
-# FFXIV resources + wiki
-FFXIV_RESOURCES_CHANNEL_ID: Final[int] = 1251693839962607669  # #ffxiv-resources
-FFXIV_WIKI_CHANNEL_ID: Final[int] = 1428352638998544475      # #ffxiv-wiki
+FOOLS_CHANNEL_ID: Final[int] = 1251693839962607675         # #where-fools-get-sent (update if different)
 
-# Fools gallery
-FOOLS_CHANNEL_ID: Final[int] = 1251693840365125698           # #where-fools-get-sent
+BIRTHDAY_SET_CHANNEL_ID: Final[int] = 1251693839962607675
+BIRTHDAY_ANNOUNCE_CHANNEL_ID: Final[int] = 1251693839962607675
+BIRTHDAY_STAFF_CHANNEL_ID: Final[int] = 1251693839962607675
 
-# Join/leave logs + gate
-HERE_THEN_GONE_CHANNEL_ID: Final[int] = 1441321146820591728  # #here-then-gone
-GATE_CHANNEL_ID: Final[int] = 1441321713395826788            # #choose-your-door
-
-# Shitposting / chaos
-SHITPOSTING_CHANNEL_ID: Final[int] = 1251693839962607675     # 💩-shitposting
-
-# Link-fix / media reupload channels
-MUSIC_MEDIA_CHANNEL_ID: Final[int] = 1255281446697042061     # 🎧-music-n-media
-FORBIDDEN_DOOR_CHANNEL_ID: Final[int] = 1254679880482820157  # 🔞-forbidden-door
-SUSSY_HUMOUR_CHANNEL_ID: Final[int] = 1254688995221176365    # 👀🤡-sussy-humour
-
-# Birthdays
-BIRTHDAY_SET_CHANNEL_ID: Final[int] = 1251693839962607672
-BIRTHDAY_ANNOUNCE_CHANNEL_ID: Final[int] = 1251693840604332077
-BIRTHDAY_STAFF_CHANNEL_ID: Final[int] = 1323505715599376424
-
-# Optional: dedicated mod-log channel (None = disabled)
 MODLOG_CHANNEL_ID: Optional[int] = None
 
-# Private / internal log channel that should never be auto-cleaned
-PRIVATE_LOG_CHANNEL_ID: Final[int] = 1444159488054792273
-
 # ─────────────────────────────────────────────
-# CHANNEL SETS
+# ROLE IDS / NAMES
 # ─────────────────────────────────────────────
 
-# Where link-fixing / media reupload is active
-LINKFIX_CHANNEL_IDS: Final[Set[int]] = {
-    MUSIC_MEDIA_CHANNEL_ID,
-    FORBIDDEN_DOOR_CHANNEL_ID,
-    SUSSY_HUMOUR_CHANNEL_ID,
-    SHITPOSTING_CHANNEL_ID,
+GATE_ROLE_ID: Final[int] = 1251693839962607675  # update
+
+ADMIN_ROLE_NAMES: Final[Set[str]] = {
+    "Admin",
+    "Moderator",
 }
 
-# Channels you want AUTOCLEAN to completely ignore
-AUTO_CLEAN_EXEMPT_CHANNEL_IDS: Final[Set[int]] = {
-    FFXIV_RESOURCES_CHANNEL_ID,
-    FOOLS_CHANNEL_ID,
-    ROLES_CHANNEL_ID,
-    DUTY_EVENTS_CHANNEL_ID,
-    GIVEAWAYS_CHANNEL_ID,
-    FFXIV_WIKI_CHANNEL_ID,
-    HERE_THEN_GONE_CHANNEL_ID,
-    PRIVATE_LOG_CHANNEL_ID,  # log channel (messages should not be deleted)
-}
-
-# ─────────────────────────────────────────────
-# ROLES
-# ─────────────────────────────────────────────
-
-# Gate role given on join, removed once they choose FC/Friend
-GATE_ROLE_ID: Final[int] = 1441319854974959616  # "Not Yet Mad Enough"
-
-# Core admin/staff roles
 DOOMED_RABBIT_ROLE_NAME: Final[str] = "Doomed Rabbit"
 MADNESS_WARDEN_ROLE_NAME: Final[str] = "Madness Warden"
 
-# Tuple so we can reuse easily in permission checks
-ADMIN_ROLE_NAMES: Final[tuple[str, ...]] = (
+# Used by permissions helpers
+MOD_ROLE_NAMES: Final[tuple[str, ...]] = (
+    *tuple(ADMIN_ROLE_NAMES),
     DOOMED_RABBIT_ROLE_NAME,
     MADNESS_WARDEN_ROLE_NAME,
 )
@@ -113,3 +71,12 @@ GENDER_ROLE_IDS: Final[dict[str, int]] = {
     "They/Them": 1441330775378100234,
     "He/Him": 1441330673360048199,
 }
+
+# ─────────────────────────────────────────────
+# XIVAPI (character cards / !iam)
+# ─────────────────────────────────────────────
+
+XIVAPI_BASE_URL: Final[str] = "https://xivapi.com"
+# Optional: set an environment variable XIVAPI_PRIVATE_KEY for higher rate limits
+XIVAPI_PRIVATE_KEY: Optional[str] = os.getenv("XIVAPI_PRIVATE_KEY")
+XIVAPI_TIMEOUT_SECONDS: Final[int] = 15
