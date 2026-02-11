@@ -3,7 +3,8 @@ import logging
 import re
 import asyncio
 import tempfile
-from typing import Optional, List
+import shutil
+from typing import Optional, List, Union
 
 import discord
 from discord.ext import commands
@@ -20,6 +21,10 @@ import permissions
 HARDCODED_TOKEN = "YOUR_DISCORD_TOKEN_HERE"
 TOKEN = os.getenv("DISCORD_TOKEN", HARDCODED_TOKEN)
 
+# Optional: yt-dlp cookies file path (helps Instagram/Facebook a LOT)
+# Example: set YTDLP_COOKIES=/path/to/cookies.txt
+YTDLP_COOKIES = os.getenv("YTDLP_COOKIES", "").strip() or None
+
 # ───────────────────────────────────────────────────────────────────
 # COG EXTENSIONS
 #   IMPORTANT: autosync will discover + load other cogs itself.
@@ -32,7 +37,6 @@ INITIAL_EXTENSIONS: List[str] = [
 # ───────────────────────────────────────────────────────────────────
 # SERVER CONFIG
 # ───────────────────────────────────────────────────────────────────
-# Set to your guild ID (int) if you want guild-only /sync in autosync
 GUILD_ID = config.GUILD_ID
 
 # Channels where link-fixing / media reupload is active
@@ -70,8 +74,6 @@ async def on_ready():
 
 # ───────────────────────────────────────────────────────────────────
 # SLASH: /ping (admin only)
-#   — Same behaviour as before:
-#     only roles in config.ADMIN_ROLE_NAMES may use this.
 # ───────────────────────────────────────────────────────────────────
 
 def _ping_admin_check(interaction: discord.Interaction) -> bool:
@@ -95,7 +97,7 @@ async def ping_command(interaction: discord.Interaction):
 #  • Twitter/X → URL swap (fxtwitter / fixupx) via webhook
 #  • Reddit → URL swap to rxddit.com
 #  • Instagram/Facebook → download video with yt-dlp and upload as file
-#  • Only runs in LINKFIX_CHANNEL_IDS
+#  • Runs in LINKFIX_CHANNEL_IDS, INCLUDING THREADS under those channels
 # ───────────────────────────────────────────────────────────────────
 
 # Twitter / X
@@ -158,7 +160,7 @@ def _swap_domain(url: str) -> str:
     """
     Convert Twitter/X + Reddit links to their 'fixed' counterparts
     for better Discord embeds. Instagram/Facebook are handled by
-    downloading & uploading media instead (Option B).
+    downloading & uploading media instead.
     """
     lowered = url.lower()
 
@@ -207,6 +209,18 @@ def _fix_message_content_for_links(content: str) -> tuple[str, bool]:
     return new_content, changed
 
 
+def _effective_linkfix_id(channel: Union[discord.TextChannel, discord.Thread]) -> Optional[int]:
+    """
+    For normal channels: channel.id
+    For threads: parent channel id (so threads under #shitposting still work)
+    """
+    if isinstance(channel, discord.TextChannel):
+        return channel.id
+    if isinstance(channel, discord.Thread):
+        return channel.parent_id
+    return None
+
+
 async def _get_or_create_webhook(channel: discord.TextChannel) -> Optional[discord.Webhook]:
     """
     Find or create a webhook in this channel to impersonate the user
@@ -235,13 +249,29 @@ async def _download_media_file(url: str) -> Optional[str]:
     tmpdir = tempfile.mkdtemp(prefix="cheshire_media_")
 
     def _run() -> Optional[str]:
+        # IMPORTANT:
+        # - Facebook/Instagram often don't provide exact filesize; rely on filesize_approx too.
+        # - max_filesize prevents accidental overshoots.
+        # - cookies (optional) helps IG/FB a lot.
         ydl_opts = {
-            "format": "bv*[filesize<24000000]+ba/b[filesize<24000000]/best",
+            "format": (
+                "bv*[filesize<24000000]+ba/"
+                "bv*[filesize_approx<24000000]+ba/"
+                "b[filesize<24000000]/"
+                "b[filesize_approx<24000000]/"
+                "best"
+            ),
+            "max_filesize": 24000000,
             "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
+            "merge_output_format": "mp4",
         }
+
+        if YTDLP_COOKIES:
+            ydl_opts["cookiefile"] = YTDLP_COOKIES
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -255,7 +285,65 @@ async def _download_media_file(url: str) -> Optional[str]:
 
     loop = asyncio.get_running_loop()
     path = await loop.run_in_executor(None, _run)
+
+    # If it failed, clean up the temp directory
+    if not path:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
     return path
+
+
+async def _send_via_webhook_or_fallback(
+    *,
+    destination: Union[discord.TextChannel, discord.Thread],
+    parent_text_channel: discord.TextChannel,
+    perms: discord.Permissions,
+    content: str,
+    username: str,
+    avatar_url: Optional[str],
+    file: Optional[discord.File] = None,
+    allowed_mentions: Optional[discord.AllowedMentions] = None,
+) -> bool:
+    """
+    Prefer webhook (so AutoClean doesn't delete it). If we're in a thread,
+    send the webhook message INTO that thread.
+    """
+    allowed_mentions = allowed_mentions or discord.AllowedMentions.none()
+
+    webhook: Optional[discord.Webhook] = None
+    if perms.manage_webhooks:
+        webhook = await _get_or_create_webhook(parent_text_channel)
+
+    try:
+        if webhook:
+            kwargs = {
+                "content": content,
+                "username": username,
+                "avatar_url": avatar_url,
+                "allowed_mentions": allowed_mentions,
+            }
+            if file is not None:
+                kwargs["file"] = file
+
+            # discord.py supports sending webhooks into threads via thread=...
+            if isinstance(destination, discord.Thread):
+                kwargs["thread"] = destination  # type: ignore[assignment]
+
+            await webhook.send(**kwargs)  # type: ignore[arg-type]
+            return True
+
+        # fallback: normal bot send (may get autodeleted by AutoClean, but better than nothing)
+        await destination.send(content, file=file, allowed_mentions=allowed_mentions)
+        return True
+    except discord.HTTPException:
+        logging.exception("Failed to send via webhook/fallback")
+        return False
+    except Exception:
+        logging.exception("Unexpected send failure")
+        return False
 
 
 async def _reupload_instaface_media(
@@ -271,59 +359,51 @@ async def _reupload_instaface_media(
         return False
 
     channel = message.channel
-    if not isinstance(channel, discord.TextChannel):
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         return False
 
-    webhook: Optional[discord.Webhook] = None
-    if perms.manage_webhooks:
-        webhook = await _get_or_create_webhook(channel)
+    # Parent channel is where we need to create/manage webhooks
+    parent = channel if isinstance(channel, discord.TextChannel) else channel.parent
+    if not isinstance(parent, discord.TextChannel):
+        return False
 
     any_success = False
 
     for u in urls:
         path = await _download_media_file(u)
-        if not path:
+        if not path or not os.path.exists(path):
             continue
 
         file = discord.File(path)
 
-        # PREVENT DISCORD FROM EMBEDDING THE FACEBOOK/INSTAGRAM LINK
+        # Prevent Discord from embedding the FB/IG link
         safe_url = f"<{u}>"
-
-        # CLEAN FINAL MESSAGE
         content = f"{message.author.mention} shared: {safe_url}"
 
-        try:
-            if webhook:
-                await webhook.send(
-                    content,
-                    username=message.author.display_name,
-                    avatar_url=(
-                        message.author.display_avatar.url
-                        if message.author.display_avatar
-                        else None
-                    ),
-                    file=file,
-                    allowed_mentions=discord.AllowedMentions(
-                        users=True, roles=False, everyone=False
-                    ),
-                )
-            else:
-                await channel.send(
-                    content,
-                    file=file,
-                    allowed_mentions=discord.AllowedMentions(
-                        users=True, roles=False, everyone=False
-                    ),
-                )
+        ok = await _send_via_webhook_or_fallback(
+            destination=channel,
+            parent_text_channel=parent,
+            perms=perms,
+            content=content,
+            username=message.author.display_name,
+            avatar_url=(message.author.display_avatar.url if message.author.display_avatar else None),
+            file=file,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+
+        if ok:
             any_success = True
-        except discord.HTTPException:
-            logging.exception("Failed to upload media for %s", u)
-        finally:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+
+        # Cleanup downloaded file and temp directory
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        try:
+            tmpdir = os.path.dirname(path)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
     return any_success
 
@@ -337,13 +417,24 @@ async def on_message(message: discord.Message):
         except Exception:
             logging.exception("process_commands failed")
 
-    # Ignore DM channels & non-text channels
-    if not isinstance(message.channel, discord.TextChannel):
+    # Ignore DMs
+    if message.guild is None:
         await _process_cmds()
         return
 
-    # Only run link/media handler in configured channels
-    if message.channel.id not in LINKFIX_CHANNEL_IDS:
+    # Only handle guild text channels + threads
+    if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
+        await _process_cmds()
+        return
+
+    channel = message.channel
+    effective_id = _effective_linkfix_id(channel)
+    if effective_id is None:
+        await _process_cmds()
+        return
+
+    # Only run link/media handler in configured channels (threads inherit parent)
+    if effective_id not in LINKFIX_CHANNEL_IDS:
         await _process_cmds()
         return
 
@@ -357,15 +448,21 @@ async def on_message(message: discord.Message):
     if me is None:
         await _process_cmds()
         return
-    perms: discord.Permissions = message.channel.permissions_for(me)
+
+    perms: discord.Permissions = channel.permissions_for(me)
     if not perms.manage_messages:
         await _process_cmds()
         return
 
     content = message.content or ""
     urls = [m.group(1) for m in URL_REGEX.finditer(content)]
-
     insta_fb_urls = [u for u in urls if _is_instagram(u) or _is_facebook(u)]
+
+    # Parent channel for webhook management
+    parent = channel if isinstance(channel, discord.TextChannel) else channel.parent
+    if not isinstance(parent, discord.TextChannel):
+        await _process_cmds()
+        return
 
     did_media = False
     if insta_fb_urls:
@@ -376,30 +473,16 @@ async def on_message(message: discord.Message):
 
     did_text = False
     if changed:
-        webhook = None
-        if perms.manage_webhooks:
-            webhook = await _get_or_create_webhook(message.channel)
-
-        try:
-            if webhook:
-                await webhook.send(
-                    fixed_content,
-                    username=message.author.display_name,
-                    avatar_url=(
-                        message.author.display_avatar.url
-                        if message.author.display_avatar
-                        else None
-                    ),
-                    allowed_mentions=discord.AllowedMentions.all(),
-                )
-            else:
-                await message.channel.send(
-                    fixed_content,
-                    allowed_mentions=discord.AllowedMentions.all(),
-                )
-            did_text = True
-        except Exception:
-            logging.exception("Failed to repost fixed links")
+        did_text = await _send_via_webhook_or_fallback(
+            destination=channel,
+            parent_text_channel=parent,
+            perms=perms,
+            content=fixed_content,
+            username=message.author.display_name,
+            avatar_url=(message.author.display_avatar.url if message.author.display_avatar else None),
+            file=None,
+            allowed_mentions=discord.AllowedMentions.all(),
+        )
 
     # If we reposted anything (media or fixed text), delete the original
     if did_media or did_text:
@@ -408,7 +491,6 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
 
-    # Continue processing commands
     await _process_cmds()
 
 
