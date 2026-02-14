@@ -16,7 +16,7 @@ ST_TIMEZONE: Final[str] = "Europe/Luxembourg"
 # ─────────────────────────────────────────────
 
 GATE_CHANNEL_ID: Final[int] = 1251693839962607675          # #choose-your-door
-HERE_THEN_GONE_CHANNEL_ID: Final[int] = 1251693839962607675  # #here-then-gone
+HERE_THEN_GONE_CHANNEL_ID: Final[int] = 1441321146820591728  # #here-then-gone
 ROLES_CHANNEL_ID: Final[int] = 1251693839962607675         # #pick-your-roles
 
 GIVEAWAYS_CHANNEL_ID: Final[int] = 1251693839962607675     # #giveaways
