@@ -22,6 +22,9 @@ FOOLS_FOOTERS: tuple[str, ...] = (
     "Another masterpiece of poor decision-making.",
 )
 
+# Hard-pin the destination channel to avoid config drift / wrong env config
+FORCED_FOOLS_CHANNEL_ID = 1251693840365125698
+
 
 # ── HELPERS ────────────────────────────────────────────────────────
 
@@ -72,8 +75,8 @@ async def _send_fool_embed(
         raise RuntimeError("This can only be used in a server, not in DMs.")
 
     channel = (
-        guild.get_channel(config.FOOLS_CHANNEL_ID)
-        or guild.get_thread(config.FOOLS_CHANNEL_ID)
+        guild.get_channel(FORCED_FOOLS_CHANNEL_ID)
+        or guild.get_thread(FORCED_FOOLS_CHANNEL_ID)
     )
     if channel is None:
         raise RuntimeError(
