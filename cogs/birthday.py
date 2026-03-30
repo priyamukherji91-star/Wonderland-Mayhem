@@ -31,7 +31,7 @@ BIRTHDAY_DB_PATH = os.getenv("BIRTHDAY_DB_PATH", "data/birthdays.json")
 # ── CONFIG FROM CONFIG.PY ────────────────────────────────────────
 
 BIRTHDAY_SET_CHANNEL_ID = config.BIRTHDAY_SET_CHANNEL_ID
-BIRTHDAY_ANNOUNCE_CHANNEL_ID = config.BIRTHDAY_ANNOUNCE_CHANNEL_ID
+BIRTHDAY_ANNOUNCE_CHANNEL_ID = 1251693840604332077
 BIRTHDAY_STAFF_CHANNEL_ID = config.BIRTHDAY_STAFF_CHANNEL_ID
 DOOMED_RABBIT_ROLE_NAME = config.DOOMED_RABBIT_ROLE_NAME
 ST_TIMEZONE = config.ST_TIMEZONE
@@ -67,7 +67,6 @@ EPHEMERAL_CONFIRM_TEXT = "Done! When the clock strikes your day, I’ll shout it
 def _load_birthdays() -> Dict[str, Any]:
     """Load the birthday DB from disk. Returns {} if missing or broken."""
     try:
-        # Ensure parent dir exists (in case the file will be created later)
         parent = os.path.dirname(BIRTHDAY_DB_PATH)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -81,9 +80,9 @@ def _load_birthdays() -> Dict[str, Any]:
             if isinstance(data, dict):
                 log.info("Loaded birthday DB from %s (guilds: %d).", BIRTHDAY_DB_PATH, len(data))
                 return data
-            else:
-                log.warning("Birthday DB at %s is not a dict; resetting.", BIRTHDAY_DB_PATH)
-                return {}
+
+            log.warning("Birthday DB at %s is not a dict; resetting.", BIRTHDAY_DB_PATH)
+            return {}
     except Exception:
         log.exception("Failed to read birthday DB at %s", BIRTHDAY_DB_PATH)
         return {}
@@ -95,8 +94,10 @@ def _save_birthdays(data: Dict[str, Any]) -> None:
         parent = os.path.dirname(BIRTHDAY_DB_PATH)
         if parent:
             os.makedirs(parent, exist_ok=True)
+
         with open(BIRTHDAY_DB_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
         log.info("Saved birthday DB to %s", BIRTHDAY_DB_PATH)
     except Exception:
         log.exception("Failed to write birthday DB to %s", BIRTHDAY_DB_PATH)
@@ -154,13 +155,11 @@ class Birthdays(commands.Cog):
             )
             return
 
-        # Accept DD/MM or D/M, basic validation
         try:
             parts = date.strip().replace(" ", "").split("/")
             if len(parts) != 2:
                 raise ValueError
             d, m = (int(parts[0]), int(parts[1]))
-            # Validate using a dummy year
             datetime(year=2000, month=m, day=d)
         except Exception:
             await interaction.response.send_message(
@@ -174,11 +173,12 @@ class Birthdays(commands.Cog):
 
         self._set_birthday(interaction.guild.id, interaction.user.id, mm_dd)
 
-        public_line = random.choice(PUBLIC_ROAST_CONFIRM).format(mention=interaction.user.mention)
+        public_line = random.choice(PUBLIC_ROAST_CONFIRM).format(
+            mention=interaction.user.mention
+        )
 
         await interaction.response.send_message(EPHEMERAL_CONFIRM_TEXT, ephemeral=True)
 
-        # Public confirmation roast in the birthday channel
         try:
             channel = interaction.guild.get_channel(BIRTHDAY_SET_CHANNEL_ID)
             if isinstance(channel, discord.TextChannel):
@@ -198,7 +198,6 @@ class Birthdays(commands.Cog):
             return
 
         lines = []
-        # sort by date (MM-DD)
         for uid, mm_dd in sorted(g.items(), key=lambda kv: kv[1]):
             member = interaction.guild.get_member(int(uid))
             if not member:
@@ -250,7 +249,6 @@ class Birthdays(commands.Cog):
                 if not guild_data:
                     continue
 
-                # Find members with birthdays today
                 members_today: list[discord.Member] = []
                 for uid, mm_dd in guild_data.items():
                     if mm_dd != today:
@@ -278,7 +276,6 @@ class Birthdays(commands.Cog):
 
     @check_birthdays.before_loop
     async def before_check_birthdays(self) -> None:
-        # Ensure the bot is ready before starting the loop
         await self.bot.wait_until_ready()
 
 
