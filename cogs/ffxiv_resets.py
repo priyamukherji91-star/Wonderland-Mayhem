@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+import random
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, time as dtime
 
 import discord
@@ -30,12 +31,83 @@ DAILY_RESET_UTC = dtime(hour=15, minute=0, tzinfo=timezone.utc)   # 15:00 UTC
 WEEKLY_RESET_UTC = dtime(hour=8, minute=0, tzinfo=timezone.utc)   # 08:00 UTC
 WEEKLY_RESET_WEEKDAY = 1  # Monday=0, Tuesday=1, ...
 
+DAILY_RESET_LINES = [
+    "Your dailies are up. Bring me results, not the little bedtime stories you tell yourself.",
+    "Off you go, scavenging tomes and dignity in equal measure.",
+    "Your dailies are up. For the three of you who survived Dawntrail and stayed subscribed, congrats.",
+    "Time to perform meaningless labor for tomestones and emotional scraps.",
+    "Get off the sofa, you upholstered excuse for a Warrior of Light.",
+    "Pretend you have purpose beyond standing in Limsa.",
+    "Remove the horny little glam and go engage with combat, freak.",
+    "Queue up, and this time try not to play like a community warning.",
+    "Your dailies are waiting. Save the main character syndrome for Limsa.",
+    "Reset... go contribute something, you decorative parasite",
+    "The aetheryte is not your workstation, you idle little barnacle.",
+    "If you have time to pose, you have time to stop being ornamental and queue.",
+    "Get in there before I file a formal complaint about your decorative existence.",
+    "One had hoped you might eventually justify your subscription.",
+    "One does tire of seeing so much glamour and so little competence.",
+    "Your roulettes are available. Try not to make a spectacle of your inadequacy.",
+    "Your roulettes await. Even now, I cling to the vulgar hope that you may be useful.",
+    "Your dailies are up. I have seen retainers with more initiative.",
+    "Your roulettes are available. Try to remember that confidence and competence are not hereditary.",
+    "Your dailies are up. Really, dear, must your entire personality remain in /gpose?",
+    "Daily reset. I will not say you are useless. I will merely observe that Eorzea has yet to notice your absence.",
+    "One must accept that not everyone can be excellent. But you might at least be occupied.",
+    "Must you always look so committed to doing nothing?",
+    "There is something deeply reassuring about your consistency. You are idle in every expansion.",
+    "Your dailies await. If you moved any less, we’d have to water you.",
+    "Your dailies are up. One hates to interrupt such passionate loafing…",
+    "The realm remains in peril, though naturally you are still dressed for brunch.",
+    "I cannot say whether you are lazy or merely committed to atmosphere.",
+    "One trembles to think of four or seven strangers relying on you.",
+    "Eorzea did not survive multiple calamities for you to idle in Limsa.",
+    "Your dailies are up. The Echo was wasted on you…",
+    "Your dailies await. Somewhere, Alphinaud is explaining your absence with undeserved optimism.",
+    "For someone allegedly touched by destiny, you do lounge remarkably hard.",
+    "The Final Days came and went, yet somehow you remain the greater trial.",
+    "The Scions crossed continents, dimensions, and death itself. You can manage a roulette.",
+    "Emet-Selch endured millennia, and you cannot endure one leveling roulette.",
+    "Thancred has reinvented himself several times. You remain committed to decorative stagnation.",
+    "Your dailies are ready. Louisoix gave everything. You are being asked for twenty minutes and a functional rotation.",
+    "Haurchefant gave you his faith, and you repay him by idling near the retainer bell.",
+    "Daily reset. Krile could probably sense your reluctance as a regional disturbance.",
+    "Even the ancients, spectacularly flawed as they were, understood the value of getting on with it.",
+    "You’ve journeyed from Ul’dah to Ultima Thule and still act surprised by basic responsibility.",
+    "Hades had more faith in mankind than I have in your uptime.",
+    "Daily reset. Haurchefant died believing in you, which now feels deeply embarrassing.",
+    "The mothercrystal shattered. Your excuses somehow survived intact.",
+    "How tragic that Emet-Selch suffered by forgetting his whole story, while you just forget your basic duties…",
+    "Your dailies await. One imagines G’raha would still adore you, which is what makes this sad.",
+    "Thancred spent less time avoiding his feelings than you spend avoiding content.",
+    "Even after Emet-selch remembered, he still forgot about you because you're still as useless as ever…",
+    "The Scions have all died at least a little for this, and you repay them with /gpose and gooning…",
+    "Even Tataru’s spreadsheets have seen more combat readiness.",
+    "The seat of Azem has suffered many indignities; your laziness may be the final one.",
+    "If Meteion had scanned your activity feed, she’d have sung of stagnation.",
+    "Krile can sense many things, and I assume your reluctance now has its own aetherial signature",
+    "Daily reset. At this point, even Emet-Selch would call you a disappointing use of reincarnation.",
+]
+
+WEEKLY_RESET_LINES = [
+    "Your weekly obligations have returned. I trust your despair is suitably dignified.",
+    "Weekly reset. Do step away from the glamour plate, dear. Beauty is no substitute for output.",
+    "Your weeklies are available. I expect motion, not another week of decorative paralysis in Limsa.",
+    "A new week begins. Do make some modest effort toward usefulness.",
+    "Your weekly duties await. I would not call them enjoyable, but then neither are you.",
+    "Your weeklies are up. How charming that Eorzea still believes in your potential.",
+]
+
 
 @dataclass
 class ResetState:
     channel_id: int | None = None
     last_daily_fired_utc_date: str | None = None   # "YYYY-MM-DD"
     last_weekly_fired_utc_date: str | None = None  # "YYYY-MM-DD"
+    daily_line_bag: list[str] = field(default_factory=list)
+    weekly_line_bag: list[str] = field(default_factory=list)
+    last_daily_line: str | None = None
+    last_weekly_line: str | None = None
 
     @staticmethod
     def load() -> "ResetState":
@@ -46,6 +118,10 @@ class ResetState:
                 channel_id=raw.get("channel_id"),
                 last_daily_fired_utc_date=raw.get("last_daily_fired_utc_date"),
                 last_weekly_fired_utc_date=raw.get("last_weekly_fired_utc_date"),
+                daily_line_bag=raw.get("daily_line_bag") or [],
+                weekly_line_bag=raw.get("weekly_line_bag") or [],
+                last_daily_line=raw.get("last_daily_line"),
+                last_weekly_line=raw.get("last_weekly_line"),
             )
         except FileNotFoundError:
             return ResetState()
@@ -62,6 +138,10 @@ class ResetState:
                         "channel_id": self.channel_id,
                         "last_daily_fired_utc_date": self.last_daily_fired_utc_date,
                         "last_weekly_fired_utc_date": self.last_weekly_fired_utc_date,
+                        "daily_line_bag": self.daily_line_bag,
+                        "weekly_line_bag": self.weekly_line_bag,
+                        "last_daily_line": self.last_daily_line,
+                        "last_weekly_line": self.last_weekly_line,
                     },
                     f,
                     ensure_ascii=False,
@@ -142,6 +222,33 @@ class FFXIVResets(commands.Cog):
         ch = guild.get_channel(self._channel_id())
         return ch if isinstance(ch, discord.TextChannel) else None
 
+    def _next_line(self, *, kind: str) -> str:
+        if kind == "daily":
+            source_lines = DAILY_RESET_LINES
+            bag = self.state.daily_line_bag
+            last_key = "last_daily_line"
+        else:
+            source_lines = WEEKLY_RESET_LINES
+            bag = self.state.weekly_line_bag
+            last_key = "last_weekly_line"
+
+        if not source_lines:
+            return "Reset."
+
+        if not bag:
+            bag.extend(source_lines)
+            random.shuffle(bag)
+
+            last_line = getattr(self.state, last_key)
+            if len(bag) > 1 and bag[0] == last_line:
+                swap_index = random.randrange(1, len(bag))
+                bag[0], bag[swap_index] = bag[swap_index], bag[0]
+
+        line = bag.pop(0)
+        setattr(self.state, last_key, line)
+        self.state.save()
+        return line
+
     async def _post_embed(self, guild: discord.Guild, *, title: str, body: str) -> None:
         ch = self._resolve_channel(guild)
         if ch is None:
@@ -169,11 +276,13 @@ class FFXIVResets(commands.Cog):
         if self.state.last_daily_fired_utc_date == today:
             return
 
+        body = self._next_line(kind="daily")
+
         for guild in self.bot.guilds:
             await self._post_embed(
                 guild,
                 title="☀️ Daily Reset (FFXIV)",
-                body="Daily roulettes / allowances just reset.",
+                body=body,
             )
 
         self.state.last_daily_fired_utc_date = today
@@ -195,11 +304,13 @@ class FFXIVResets(commands.Cog):
         if self.state.last_weekly_fired_utc_date == today:
             return
 
+        body = self._next_line(kind="weekly")
+
         for guild in self.bot.guilds:
             await self._post_embed(
                 guild,
                 title="🗓️ Weekly Reset (FFXIV)",
-                body="Weekly activities just reset (caps / lockouts / challenge log, etc.).",
+                body=body,
             )
 
         self.state.last_weekly_fired_utc_date = today
@@ -281,6 +392,37 @@ class FFXIVResets(commands.Cog):
             body="If you see this, the cog can post to the configured channel.",
         )
         await interaction.response.send_message("Test message sent.", ephemeral=True)
+
+    @ffxivresets.command(name="test_random", description="Send a random daily or weekly reset line to the configured channel.")
+    @permissions.mod_slash_only()
+    @app_commands.describe(kind="Choose whether to test a daily or weekly line.")
+    @app_commands.choices(
+        kind=[
+            app_commands.Choice(name="daily", value="daily"),
+            app_commands.Choice(name="weekly", value="weekly"),
+        ]
+    )
+    async def test_random_cmd(
+        self,
+        interaction: discord.Interaction,
+        kind: app_commands.Choice[str],
+    ) -> None:
+        if interaction.guild is None:
+            return await interaction.response.send_message("Use this in a server.", ephemeral=True)
+
+        is_daily = kind.value == "daily"
+        title = "☀️ Daily Reset (FFXIV)" if is_daily else "🗓️ Weekly Reset (FFXIV)"
+        body = self._next_line(kind=kind.value)
+
+        await self._post_embed(
+            interaction.guild,
+            title=title,
+            body=body,
+        )
+        await interaction.response.send_message(
+            f"Random {kind.value} reset line sent.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
