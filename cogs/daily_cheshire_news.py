@@ -592,6 +592,7 @@ class DailyCheshireNews(commands.Cog):
 
         start_time = end_time - timedelta(hours=PET_LOOKBACK_HOURS)
         used_ids = set(self.state.used_pet_message_ids)
+        candidates: list[PetCandidate] = []
 
         try:
             async for msg in channel.history(limit=None, after=start_time, oldest_first=False):
@@ -624,19 +625,24 @@ class DailyCheshireNews(commands.Cog):
                 context_text = clean_message_content(msg)
                 author_name = discord.utils.escape_markdown(msg.author.display_name, as_needed=True)
 
-                return PetCandidate(
-                    message_id=msg.id,
-                    image_url=image_url,
-                    author_name=author_name,
-                    posted_at=msg.created_at,
-                    context_text=context_text,
+                candidates.append(
+                    PetCandidate(
+                        message_id=msg.id,
+                        image_url=image_url,
+                        author_name=author_name,
+                        posted_at=msg.created_at,
+                        context_text=context_text,
+                    )
                 )
         except discord.Forbidden:
             return None
         except Exception:
             return None
 
-        return None
+        if not candidates:
+            return None
+
+        return random.choice(candidates)
 
     async def generate_pet_caption(self, pet: PetCandidate) -> str | None:
         if not self.client:
