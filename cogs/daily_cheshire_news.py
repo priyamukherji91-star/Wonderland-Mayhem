@@ -8,7 +8,7 @@ import os
 import random
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -27,6 +27,7 @@ POST_MINUTE = 0
 
 LIVE_POST_CHANNEL_ID = 1495002313226719372
 TEST_POST_CHANNEL_ID = 1323505715599376424
+PET_SOURCE_CHANNEL_ID = 1428118992215609354
 
 SOURCE_CHANNEL_IDS = [
     1251693839962607672,
@@ -58,6 +59,8 @@ IGNORED_PREFIXES = ("!", "/", ".")
 MAX_LINE_LENGTH = 260
 MAX_TRANSCRIPT_LINES = 180
 MAX_EMBED_BODY_LENGTH = 3500
+PET_LOOKBACK_HOURS = 48
+MAX_USED_PET_IDS = 100
 
 MENTION_RE = re.compile(r"<@!?(?P<id>\d+)>")
 ROLE_MENTION_RE = re.compile(r"<@&(?P<id>\d+)>")
@@ -111,6 +114,8 @@ SUMMARY_FILLERS = [
     "I regret to inform you that people kept talking.",
 ]
 
+VALID_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
 
 # ──────────────────────────────────────────────────────────────
 # STATE
@@ -118,22 +123,26 @@ SUMMARY_FILLERS = [
 @dataclass
 class DailyCheshireNewsState:
     last_live_post_date: str | None = None
+    used_pet_message_ids: list[int] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> "DailyCheshireNewsState":
         if STATE_PATH.exists():
             try:
                 data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+                raw_ids = data.get("used_pet_message_ids") or []
+                data["used_pet_message_ids"] = [int(x) for x in raw_ids if str(x).isdigit()]
                 return cls(**data)
             except Exception:
                 return cls()
         return cls()
 
     def save(self) -> None:
-        STATE_PATH.write_text(
-            json.dumps({"last_live_post_date": self.last_live_post_date}, indent=2),
-            encoding="utf-8"
-        )
+        payload = {
+            "last_live_post_date": self.last_live_post_date,
+            "used_pet_message_ids": self.used_pet_message_ids[-MAX_USED_PET_IDS:],
+        }
+        STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -357,6 +366,27 @@ def build_fallback_news(grouped: dict[str, list[str]], total_messages: int) -> s
     return "\n\n".join(sections)
 
 
+def is_supported_image_url(url: str) -> bool:
+    lowered = url.lower().split("?", 1)[0]
+    return lowered.endswith(VALID_IMAGE_EXTENSIONS)
+
+
+def attachment_is_image(attachment: discord.Attachment) -> bool:
+    ctype = (attachment.content_type or "").lower()
+    if ctype.startswith("image/"):
+        return True
+    return attachment.filename.lower().endswith(VALID_IMAGE_EXTENSIONS)
+
+
+@dataclass
+class PetCandidate:
+    message_id: int
+    image_url: str
+    author_name: str
+    posted_at: datetime
+    context_text: str
+
+
 # ──────────────────────────────────────────────────────────────
 # COG
 # ──────────────────────────────────────────────────────────────
@@ -401,9 +431,10 @@ class DailyCheshireNews(commands.Cog):
             return
 
         try:
-            embed = await self.build_news_embed(for_test=False)
-            await channel.send(embed=embed)
+            embeds, used_pet_message_id = await self.build_news_embeds(for_test=False)
+            await channel.send(embeds=embeds)
             self.state.last_live_post_date = today_key
+            self._remember_used_pet(used_pet_message_id)
             self.state.save()
         except Exception as e:
             print(f"[DailyCheshireNews] Automatic live post failed: {e}")
@@ -433,8 +464,8 @@ class DailyCheshireNews(commands.Cog):
             return
 
         try:
-            embed = await self.build_news_embed(for_test=True)
-            await channel.send(embed=embed)
+            embeds, _ = await self.build_news_embeds(for_test=True)
+            await channel.send(embeds=embeds)
             await interaction.followup.send("Test post sent. 🐾", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Test failed: `{e}`", ephemeral=True)
@@ -460,13 +491,24 @@ class DailyCheshireNews(commands.Cog):
             return
 
         try:
-            embed = await self.build_news_embed(for_test=False)
-            await channel.send(embed=embed)
+            embeds, used_pet_message_id = await self.build_news_embeds(for_test=False)
+            await channel.send(embeds=embeds)
+            self._remember_used_pet(used_pet_message_id)
+            self.state.save()
             await interaction.followup.send("Repost sent. 🐾", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Repost failed: `{e}`", ephemeral=True)
 
-    async def build_news_embed(self, for_test: bool) -> discord.Embed:
+    def _remember_used_pet(self, message_id: int | None) -> None:
+        if not message_id:
+            return
+        if message_id in self.state.used_pet_message_ids:
+            return
+        self.state.used_pet_message_ids.append(message_id)
+        if len(self.state.used_pet_message_ids) > MAX_USED_PET_IDS:
+            self.state.used_pet_message_ids = self.state.used_pet_message_ids[-MAX_USED_PET_IDS:]
+
+    async def build_news_embeds(self, for_test: bool) -> tuple[list[discord.Embed], int | None]:
         now = local_now()
         end_time = now.replace(second=0, microsecond=0)
         start_time = end_time - timedelta(hours=24)
@@ -484,12 +526,26 @@ class DailyCheshireNews(commands.Cog):
         )
 
         title_date = now.strftime("%B %d, %Y")
-        embed = discord.Embed(
+        news_embed = discord.Embed(
             title=f"Daily Cheshire News — {title_date}",
             description=split_embed_description(body, limit=MAX_EMBED_BODY_LENGTH),
             color=discord.Color.random(),
         )
-        return embed
+
+        pet_candidate = await self.find_menace_candidate(end_time=end_time)
+        pet_embed: discord.Embed | None = None
+        used_pet_message_id: int | None = None
+
+        if pet_candidate:
+            pet_caption = await self.generate_pet_caption(pet_candidate)
+            pet_embed = self.build_pet_embed(pet_candidate, pet_caption)
+            used_pet_message_id = pet_candidate.message_id
+
+        embeds = [news_embed]
+        if pet_embed:
+            embeds.append(pet_embed)
+
+        return embeds, used_pet_message_id
 
     async def collect_transcript_data(
         self,
@@ -534,6 +590,127 @@ class DailyCheshireNews(commands.Cog):
 
         lines = choose_relevant_lines(lines, MAX_TRANSCRIPT_LINES)
         return lines, dict(grouped), len(collected)
+
+    async def find_menace_candidate(self, end_time: datetime) -> PetCandidate | None:
+        channel = self.bot.get_channel(PET_SOURCE_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel):
+            return None
+
+        start_time = end_time - timedelta(hours=PET_LOOKBACK_HOURS)
+        used_ids = set(self.state.used_pet_message_ids)
+
+        try:
+            async for msg in channel.history(limit=None, after=start_time, oldest_first=False):
+                if msg.created_at.replace(tzinfo=msg.created_at.tzinfo or TIMEZONE) > end_time:
+                    continue
+                if msg.author.bot:
+                    continue
+                if msg.id in used_ids:
+                    continue
+
+                image_url: str | None = None
+
+                for attachment in msg.attachments:
+                    if attachment_is_image(attachment):
+                        image_url = attachment.url
+                        break
+
+                if not image_url:
+                    for embed in msg.embeds:
+                        if embed.image and embed.image.url and is_supported_image_url(embed.image.url):
+                            image_url = embed.image.url
+                            break
+                        if embed.thumbnail and embed.thumbnail.url and is_supported_image_url(embed.thumbnail.url):
+                            image_url = embed.thumbnail.url
+                            break
+
+                if not image_url:
+                    continue
+
+                context_text = clean_message_content(msg)
+                author_name = discord.utils.escape_markdown(msg.author.display_name, as_needed=True)
+
+                return PetCandidate(
+                    message_id=msg.id,
+                    image_url=image_url,
+                    author_name=author_name,
+                    posted_at=msg.created_at,
+                    context_text=context_text,
+                )
+        except discord.Forbidden:
+            return None
+        except Exception:
+            return None
+
+        return None
+
+    async def generate_pet_caption(self, pet: PetCandidate) -> str | None:
+        if not self.client:
+            return None
+
+        system_prompt = (
+            "You are Cheshire writing a short funny Discord caption for a pet photo. "
+            "Write in English only. "
+            "Tone: dry, sarcastic, playful little menace, but affectionate rather than cruel. "
+            "Base the caption on the actual image contents. "
+            "Do not rely on filenames. "
+            "Do not use hashtags. "
+            "Do not use bullet points. "
+            "Do not use real Discord mentions or @ symbols. "
+            "Keep it to 1 or 2 short sentences, maximum 220 characters."
+        )
+
+        context_bits = [
+            f"Posted by: {pet.author_name}",
+            f"Posted at: {pet.posted_at.astimezone(TIMEZONE).strftime('%Y-%m-%d %H:%M')}",
+        ]
+        if pet.context_text:
+            context_bits.append(f"Optional surrounding message text: {pet.context_text}")
+
+        user_content = [
+            {
+                "type": "text",
+                "text": (
+                    "Look at this pet image and write the 'Menace of the Day' caption.\n"
+                    + "\n".join(context_bits)
+                ),
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": pet.image_url},
+            },
+        ]
+
+        try:
+            completion = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                model=OPENAI_MODEL,
+                temperature=1.0,
+                max_completion_tokens=120,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            text = (completion.choices[0].message.content or "").strip()
+            if text:
+                return clamp_text(text, 220)
+        except Exception as e:
+            print(f"[DailyCheshireNews] Pet caption generation failed, skipping caption: {e}")
+
+        return None
+
+    def build_pet_embed(self, pet: PetCandidate, caption: str | None) -> discord.Embed:
+        description = caption or "Menace located. Visual evidence attached."
+
+        embed = discord.Embed(
+            title="Menace of the Day",
+            description=description,
+            color=discord.Color.random(),
+        )
+        embed.set_image(url=pet.image_url)
+        embed.set_footer(text=f"Spotted within the last {PET_LOOKBACK_HOURS} hours")
+        return embed
 
     async def generate_news_text(
         self,
