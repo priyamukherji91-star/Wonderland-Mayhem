@@ -532,20 +532,14 @@ class DailyCheshireNews(commands.Cog):
             color=discord.Color.random(),
         )
 
-        pet_candidate = await self.find_menace_candidate(end_time=end_time)
-        pet_embed: discord.Embed | None = None
         used_pet_message_id: int | None = None
-
+        pet_candidate = await self.find_menace_candidate(end_time=end_time)
         if pet_candidate:
             pet_caption = await self.generate_pet_caption(pet_candidate)
-            pet_embed = self.build_pet_embed(pet_candidate, pet_caption)
+            self.apply_pet_to_news_embed(news_embed, pet_candidate, pet_caption)
             used_pet_message_id = pet_candidate.message_id
 
-        embeds = [news_embed]
-        if pet_embed:
-            embeds.append(pet_embed)
-
-        return embeds, used_pet_message_id
+        return [news_embed], used_pet_message_id
 
     async def collect_transcript_data(
         self,
@@ -700,17 +694,11 @@ class DailyCheshireNews(commands.Cog):
 
         return None
 
-    def build_pet_embed(self, pet: PetCandidate, caption: str | None) -> discord.Embed:
+    def apply_pet_to_news_embed(self, embed: discord.Embed, pet: PetCandidate, caption: str | None) -> None:
         description = caption or "Menace located. Visual evidence attached."
-
-        embed = discord.Embed(
-            title="Menace of the Day",
-            description=description,
-            color=discord.Color.random(),
-        )
+        embed.add_field(name="Menace of the Day", value=description, inline=False)
         embed.set_image(url=pet.image_url)
-        embed.set_footer(text=f"Spotted within the last {PET_LOOKBACK_HOURS} hours")
-        return embed
+        embed.set_footer(text=f"Menace of the Day spotted within the last {PET_LOOKBACK_HOURS} hours")
 
     async def generate_news_text(
         self,
