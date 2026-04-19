@@ -123,15 +123,25 @@ VALID_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 @dataclass
 class DailyCheshireNewsState:
     last_live_post_date: str | None = None
-    used_pet_message_ids: list[int] = field(default_factory=list)
+    used_live_pet_message_ids: list[int] = field(default_factory=list)
+    used_test_pet_message_ids: list[int] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> "DailyCheshireNewsState":
         if STATE_PATH.exists():
             try:
                 data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-                raw_ids = data.get("used_pet_message_ids") or []
-                data["used_pet_message_ids"] = [int(x) for x in raw_ids if str(x).isdigit()]
+
+                raw_live_ids = data.get("used_live_pet_message_ids")
+                if raw_live_ids is None:
+                    raw_live_ids = data.get("used_pet_message_ids") or []
+
+                raw_test_ids = data.get("used_test_pet_message_ids") or []
+
+                data["used_live_pet_message_ids"] = [int(x) for x in raw_live_ids if str(x).isdigit()]
+                data["used_test_pet_message_ids"] = [int(x) for x in raw_test_ids if str(x).isdigit()]
+                data.pop("used_pet_message_ids", None)
+
                 return cls(**data)
             except Exception:
                 return cls()
@@ -140,7 +150,8 @@ class DailyCheshireNewsState:
     def save(self) -> None:
         payload = {
             "last_live_post_date": self.last_live_post_date,
-            "used_pet_message_ids": self.used_pet_message_ids[-MAX_USED_PET_IDS:],
+            "used_live_pet_message_ids": self.used_live_pet_message_ids[-MAX_USED_PET_IDS:],
+            "used_test_pet_message_ids": self.used_test_pet_message_ids[-MAX_USED_PET_IDS:],
         }
         STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -434,7 +445,7 @@ class DailyCheshireNews(commands.Cog):
             embeds, used_pet_message_id = await self.build_news_embeds(for_test=False)
             await channel.send(embeds=embeds)
             self.state.last_live_post_date = today_key
-            self._remember_used_pet(used_pet_message_id)
+            self._remember_used_pet(used_pet_message_id, pool="live")
             self.state.save()
         except Exception as e:
             print(f"[DailyCheshireNews] Automatic live post failed: {e}")
@@ -464,8 +475,10 @@ class DailyCheshireNews(commands.Cog):
             return
 
         try:
-            embeds, _ = await self.build_news_embeds(for_test=True)
+            embeds, used_pet_message_id = await self.build_news_embeds(for_test=True)
             await channel.send(embeds=embeds)
+            self._remember_used_pet(used_pet_message_id, pool="test")
+            self.state.save()
             await interaction.followup.send("Test post sent. 🐾", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Test failed: `{e}`", ephemeral=True)
@@ -493,20 +506,27 @@ class DailyCheshireNews(commands.Cog):
         try:
             embeds, used_pet_message_id = await self.build_news_embeds(for_test=False)
             await channel.send(embeds=embeds)
-            self._remember_used_pet(used_pet_message_id)
+            self._remember_used_pet(used_pet_message_id, pool="live")
             self.state.save()
             await interaction.followup.send("Repost sent. 🐾", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Repost failed: `{e}`", ephemeral=True)
 
-    def _remember_used_pet(self, message_id: int | None) -> None:
+    def _remember_used_pet(self, message_id: int | None, pool: str) -> None:
         if not message_id:
             return
-        if message_id in self.state.used_pet_message_ids:
+
+        if pool == "test":
+            target_ids = self.state.used_test_pet_message_ids
+        else:
+            target_ids = self.state.used_live_pet_message_ids
+
+        if message_id in target_ids:
             return
-        self.state.used_pet_message_ids.append(message_id)
-        if len(self.state.used_pet_message_ids) > MAX_USED_PET_IDS:
-            self.state.used_pet_message_ids = self.state.used_pet_message_ids[-MAX_USED_PET_IDS:]
+
+        target_ids.append(message_id)
+        if len(target_ids) > MAX_USED_PET_IDS:
+            del target_ids[:-MAX_USED_PET_IDS]
 
     async def build_news_embeds(self, for_test: bool) -> tuple[list[discord.Embed], int | None]:
         now = local_now()
@@ -533,7 +553,8 @@ class DailyCheshireNews(commands.Cog):
         )
 
         used_pet_message_id: int | None = None
-        pet_candidate = await self.find_menace_candidate(end_time=end_time)
+        pet_pool = "test" if for_test else "live"
+        pet_candidate = await self.find_menace_candidate(end_time=end_time, pool=pet_pool)
         if pet_candidate:
             pet_caption = await self.generate_pet_caption(pet_candidate)
             self.apply_pet_to_news_embed(news_embed, pet_candidate, pet_caption)
@@ -585,14 +606,16 @@ class DailyCheshireNews(commands.Cog):
         lines = choose_relevant_lines(lines, MAX_TRANSCRIPT_LINES)
         return lines, dict(grouped), len(collected)
 
-    async def find_menace_candidate(self, end_time: datetime) -> PetCandidate | None:
+    async def find_menace_candidate(self, end_time: datetime, pool: str) -> PetCandidate | None:
         channel = self.bot.get_channel(PET_SOURCE_CHANNEL_ID)
         if not isinstance(channel, discord.TextChannel):
             return None
 
         start_time = end_time - timedelta(hours=PET_LOOKBACK_HOURS)
-        used_ids = set(self.state.used_pet_message_ids)
-        candidates: list[PetCandidate] = []
+        if pool == "test":
+            used_ids = set(self.state.used_test_pet_message_ids)
+        else:
+            used_ids = set(self.state.used_live_pet_message_ids)
 
         try:
             async for msg in channel.history(limit=None, after=start_time, oldest_first=False):
@@ -625,24 +648,19 @@ class DailyCheshireNews(commands.Cog):
                 context_text = clean_message_content(msg)
                 author_name = discord.utils.escape_markdown(msg.author.display_name, as_needed=True)
 
-                candidates.append(
-                    PetCandidate(
-                        message_id=msg.id,
-                        image_url=image_url,
-                        author_name=author_name,
-                        posted_at=msg.created_at,
-                        context_text=context_text,
-                    )
+                return PetCandidate(
+                    message_id=msg.id,
+                    image_url=image_url,
+                    author_name=author_name,
+                    posted_at=msg.created_at,
+                    context_text=context_text,
                 )
         except discord.Forbidden:
             return None
         except Exception:
             return None
 
-        if not candidates:
-            return None
-
-        return random.choice(candidates)
+        return None
 
     async def generate_pet_caption(self, pet: PetCandidate) -> str | None:
         if not self.client:
