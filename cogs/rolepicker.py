@@ -1,12 +1,17 @@
+import logging
+from typing import Optional
+
 import discord
 from discord.ext import commands
 from discord import app_commands
+
 import config
 import permissions
-from typing import Union
+
+LOG = logging.getLogger(__name__)
 
 # Channel where the role menus live
-ROLES_CHANNEL_ID = config.ROLES_CHANNEL_ID  # from config
+ROLES_CHANNEL_ID = config.ROLES_CHANNEL_ID
 
 # ── Reaction → Role IDs ────────────────────────────────────────────
 # Ping roles (reaction based) – these use ROLE IDS
@@ -16,8 +21,6 @@ PING_REACTIONS: dict[str, int] = {
     "<:dig:1421926886547787916>": 1421818529010679938,          # maps
     "🦎": 1421818621973499995,                                  # unreal
     "<:deepdungeon:1255114903082106902>": 1421943829757431939,  # Deep Dungeon
-
-    # ── NEW ─────────────────────────────────────────────
     "⏲️": 1452047355552727040,                                  # Daily Roulettes
     "⚔️": 1452048195944448040,                                  # Duty Helper
     "🪓": 1452048006424559807,                                  # Crafter/Gatherer
@@ -25,8 +28,8 @@ PING_REACTIONS: dict[str, int] = {
 
 # Optional roles (reaction based) – these use ROLE NAMES (resolved at runtime)
 OPTIONAL_REACTIONS: dict[str, str] = {
-    "<:kekw:1259303576233054289>": "sussy-humour",  # sussy-humour role
-    "🔞": "NSFW",                                    # NSFW role (unlocks #forbidden-door via perms)
+    "<:kekw:1259303576233054289>": "sussy-humour",
+    "🔞": "NSFW",
 }
 
 # Gender dropdown roles
@@ -48,7 +51,7 @@ class GenderSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             options=options,
-            custom_id="gender_select_v1",  # fixed ID for persistent view
+            custom_id="gender_select_v1",
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -59,7 +62,6 @@ class GenderSelect(discord.ui.Select):
             )
             return
 
-        # Resolve role by ID from the selected value
         try:
             role_id = int(self.values[0])
         except (ValueError, TypeError):
@@ -75,9 +77,24 @@ class GenderSelect(discord.ui.Select):
             )
             return
 
-        # Remove any other gender roles from the member, then add the selected one
+        me = member.guild.me
+        if me is None or not me.guild_permissions.manage_roles:
+            await interaction.response.send_message(
+                "I don’t have permission to manage roles.", ephemeral=True
+            )
+            return
+
+        if role >= me.top_role:
+            await interaction.response.send_message(
+                "I can’t assign that role because it is above my highest role.",
+                ephemeral=True,
+            )
+            return
+
         gender_role_ids = set(GENDER_ROLES.values())
-        roles_to_remove = [r for r in member.roles if r.id in gender_role_ids]
+        roles_to_remove = [
+            r for r in member.roles if r.id in gender_role_ids and r != role
+        ]
 
         try:
             if roles_to_remove:
@@ -85,11 +102,13 @@ class GenderSelect(discord.ui.Select):
             if role not in member.roles:
                 await member.add_roles(role, reason="Selected pronoun role")
         except discord.Forbidden:
+            LOG.exception("Forbidden while updating pronoun role for %s", member.id)
             await interaction.response.send_message(
                 "I don’t have permission to change your roles.", ephemeral=True
             )
             return
         except Exception:
+            LOG.exception("Unexpected error while updating pronoun role for %s", member.id)
             await interaction.response.send_message(
                 "Something went wrong while updating your roles.", ephemeral=True
             )
@@ -100,7 +119,6 @@ class GenderSelect(discord.ui.Select):
 
 class GenderView(discord.ui.View):
     def __init__(self):
-        # timeout=None + fixed custom_id on the Select → persistent view
         super().__init__(timeout=None)
         self.add_item(GenderSelect())
 
@@ -113,18 +131,14 @@ class RolePicker(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        # Register the persistent gender view so interactions keep working
-        # after reloads/restarts.
         self.bot.add_view(GenderView())
 
-    # ── Slash: post role menus ─────────────────────────────────────
     @app_commands.command(
         name="post_roles",
-        description="Post the ping roles, optional roles, and pronoun selector."
+        description="Post the ping roles, optional roles, and pronoun selector.",
     )
     @permissions.mod_slash_only()
     async def post_roles(self, interaction: discord.Interaction):
-        # Must be in the configured roles channel
         if interaction.channel_id != ROLES_CHANNEL_ID:
             return await interaction.response.send_message(
                 "Run this in the pick-your-roles channel.", ephemeral=True
@@ -138,7 +152,6 @@ class RolePicker(commands.Cog):
                 "This command must be used in a text channel.", ephemeral=True
             )
 
-        # Build the embed
         embed = discord.Embed(
             title="Choose your chaos",
             description=(
@@ -160,66 +173,144 @@ class RolePicker(commands.Cog):
             color=0x5865F2,
         )
 
-        # Send embed + add reactions
         msg = await channel.send(embed=embed)
 
         for emoji in list(PING_REACTIONS.keys()) + list(OPTIONAL_REACTIONS.keys()):
             try:
                 await msg.add_reaction(emoji)
             except Exception:
-                pass
+                LOG.exception("Failed to add reaction %s to rolepicker message %s", emoji, msg.id)
 
-        # Add the pronoun dropdown view beneath the embed
         await channel.send(view=GenderView())
-
         await interaction.followup.send("Role menus posted.", ephemeral=True)
 
-    # ── Internal reaction handling ─────────────────────────────────
+    async def _resolve_member(
+        self, guild: discord.Guild, payload: discord.RawReactionActionEvent
+    ) -> Optional[discord.Member]:
+        member = guild.get_member(payload.user_id)
+        if member is not None:
+            return member
+
+        payload_member = getattr(payload, "member", None)
+        if isinstance(payload_member, discord.Member):
+            return payload_member
+
+        try:
+            return await guild.fetch_member(payload.user_id)
+        except discord.NotFound:
+            LOG.warning("Could not find member %s in guild %s", payload.user_id, guild.id)
+            return None
+        except discord.Forbidden:
+            LOG.exception("Missing permission to fetch member %s in guild %s", payload.user_id, guild.id)
+            return None
+        except Exception:
+            LOG.exception("Unexpected error fetching member %s in guild %s", payload.user_id, guild.id)
+            return None
+
+    async def _apply_role_change(
+        self,
+        member: discord.Member,
+        role: discord.Role,
+        add: bool,
+        reason: str,
+    ) -> None:
+        me = member.guild.me
+        if me is None:
+            LOG.warning("guild.me is None in guild %s", member.guild.id)
+            return
+
+        if not me.guild_permissions.manage_roles:
+            LOG.warning("Bot lacks Manage Roles in guild %s", member.guild.id)
+            return
+
+        if role >= me.top_role:
+            LOG.warning(
+                "Cannot manage role '%s' (%s); it is >= bot top role in guild %s",
+                role.name,
+                role.id,
+                member.guild.id,
+            )
+            return
+
+        try:
+            if add:
+                await member.add_roles(role, reason=reason)
+                LOG.info("Added role %s to member %s", role.id, member.id)
+            else:
+                await member.remove_roles(role, reason=reason)
+                LOG.info("Removed role %s from member %s", role.id, member.id)
+        except discord.Forbidden:
+            LOG.exception(
+                "Forbidden while %s role %s for member %s",
+                "adding" if add else "removing",
+                role.id,
+                member.id,
+            )
+        except Exception:
+            LOG.exception(
+                "Unexpected error while %s role %s for member %s",
+                "adding" if add else "removing",
+                role.id,
+                member.id,
+            )
+
     async def _handle_react(self, payload: discord.RawReactionActionEvent, add: bool):
         if payload.guild_id is None or payload.channel_id != ROLES_CHANNEL_ID:
             return
 
-        if payload.user_id == self.bot.user.id:
+        if self.bot.user is not None and payload.user_id == self.bot.user.id:
             return
 
         guild = self.bot.get_guild(payload.guild_id)
         if guild is None:
+            LOG.warning("Guild %s not found in cache for reaction event", payload.guild_id)
             return
 
-        member = guild.get_member(payload.user_id)
+        member = await self._resolve_member(guild, payload)
         if member is None:
             return
 
         emoji_str = str(payload.emoji)
+        LOG.info(
+            "Rolepicker reaction: guild=%s channel=%s user=%s emoji=%s add=%s",
+            payload.guild_id,
+            payload.channel_id,
+            payload.user_id,
+            emoji_str,
+            add,
+        )
 
         if emoji_str in PING_REACTIONS:
             role_id = PING_REACTIONS[emoji_str]
             role = guild.get_role(role_id)
             if role is None:
+                LOG.warning("Ping role %s not found in guild %s", role_id, guild.id)
                 return
 
-            try:
-                if add:
-                    await member.add_roles(role, reason="Ping role opt-in")
-                else:
-                    await member.remove_roles(role, reason="Ping role opt-out")
-            except Exception:
-                pass
+            await self._apply_role_change(
+                member,
+                role,
+                add,
+                reason="Ping role opt-in" if add else "Ping role opt-out",
+            )
             return
 
         if emoji_str in OPTIONAL_REACTIONS:
             role_name = OPTIONAL_REACTIONS[emoji_str]
             role = discord.utils.get(guild.roles, name=role_name)
             if role is None:
+                LOG.warning("Optional role '%s' not found in guild %s", role_name, guild.id)
                 return
 
-            try:
-                if add:
-                    await member.add_roles(role, reason="Optional role opt-in")
-                else:
-                    await member.remove_roles(role, reason="Optional role opt-out")
-            except Exception:
-                pass
+            await self._apply_role_change(
+                member,
+                role,
+                add,
+                reason="Optional role opt-in" if add else "Optional role opt-out",
+            )
+            return
+
+        LOG.info("Reaction emoji %s is not mapped to a role", emoji_str)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
