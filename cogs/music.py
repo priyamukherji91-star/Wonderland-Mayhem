@@ -21,6 +21,7 @@ MUSIC_TEXT_CHANNEL_ID = 1441863803011727380
 EMBED_COLOR = 0x5865F2
 FFMPEG_BEFORE_OPTIONS = "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"
+YTDLP_COOKIES = os.getenv("YTDLP_COOKIES", "").strip() or None
 
 YTDL_BASE_OPTS = {
     "format": "bestaudio/best",
@@ -30,18 +31,29 @@ YTDL_BASE_OPTS = {
     "extract_flat": False,
     "default_search": "ytsearch1",
     "source_address": "0.0.0.0",
+    "skip_download": True,
+    "http_headers": {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        )
+    },
 }
 
 YOUTUBE_HOSTS = (
     "youtube.com",
     "www.youtube.com",
     "m.youtube.com",
+    "music.youtube.com",
     "youtu.be",
 )
 SPOTIFY_HOSTS = (
     "open.spotify.com",
+    "play.spotify.com",
     "spotify.link",
 )
+
 SPOTIFY_TRACK_RE = re.compile(r"spotify\.com/track/([A-Za-z0-9]+)", re.IGNORECASE)
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -107,7 +119,8 @@ class Music(commands.Cog):
 
     async def send_embed(self, channel: discord.abc.Messageable, title: str, description: str) -> None:
         try:
-            await channel.send(embed=discord.Embed(title=title, description=description, color=EMBED_COLOR))
+            embed = discord.Embed(title=title, description=description, color=EMBED_COLOR)
+            await channel.send(embed=embed)
         except Exception:
             LOG.exception("Music: failed to send embed")
 
@@ -134,7 +147,11 @@ class Music(commands.Cog):
             await ctx.reply("I couldn't join that voice channel.", mention_author=False, delete_after=10)
             return None
         except discord.Forbidden:
-            await ctx.reply("I don't have permission to join or speak in that voice channel.", mention_author=False, delete_after=10)
+            await ctx.reply(
+                "I don't have permission to join or speak in that voice channel.",
+                mention_author=False,
+                delete_after=10,
+            )
             return None
         except Exception:
             LOG.exception("Music: failed to connect to voice")
@@ -147,6 +164,10 @@ class Music(commands.Cog):
 
     async def ytdl_extract(self, query: str, *, search: bool = False) -> dict:
         opts = dict(YTDL_BASE_OPTS)
+
+        if YTDLP_COOKIES:
+            opts["cookiefile"] = YTDLP_COOKIES
+
         if search:
             target = f"ytsearch1:{query}"
             opts["noplaylist"] = True
@@ -174,20 +195,12 @@ class Music(commands.Cog):
         host = self._host(url)
         return any(host == h or host.endswith(f".{h}") for h in SPOTIFY_HOSTS)
 
-    async def spotify_track_to_search(self, url: str) -> Optional[str]:
+    async def resolve_spotify_url(self, url: str) -> str:
         """
-        Best-effort Spotify track metadata fetch without extra dependencies.
-        v1 intentionally supports TRACK links only.
+        Follow Spotify share links / redirects and return the final URL if possible.
         """
         if not self.session:
-            return None
-
-        if not SPOTIFY_TRACK_RE.search(url):
-            return None
-
-        lookup_url = url
-        if "?" in lookup_url:
-            lookup_url = lookup_url.split("?", 1)[0]
+            return url
 
         headers = {
             "User-Agent": (
@@ -198,7 +211,47 @@ class Music(commands.Cog):
         }
 
         try:
-            async with self.session.get(lookup_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with self.session.get(
+                url,
+                headers=headers,
+                allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                return str(resp.url)
+        except Exception:
+            LOG.exception("Music: failed to resolve Spotify URL")
+            return url
+
+    async def spotify_track_to_search(self, url: str) -> Optional[str]:
+        """
+        Best-effort Spotify track metadata fetch without extra dependencies.
+        v1 supports TRACK links only.
+        """
+        if not self.session:
+            return None
+
+        url = await self.resolve_spotify_url(url)
+
+        if not SPOTIFY_TRACK_RE.search(url):
+            return None
+
+        lookup_url = url.split("?", 1)[0]
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            )
+        }
+
+        try:
+            async with self.session.get(
+                lookup_url,
+                headers=headers,
+                allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
                 if resp.status != 200:
                     return None
                 html = await resp.text()
@@ -215,8 +268,6 @@ class Music(commands.Cog):
         if not title:
             return None
 
-        # Spotify track pages often expose artist info in the description.
-        # We search YouTube using the cleanest metadata we can get.
         query_parts = [title]
         if desc and desc.lower() not in title.lower():
             query_parts.append(desc)
@@ -257,7 +308,16 @@ class Music(commands.Cog):
             raise commands.BadArgument("Only links are allowed.")
 
         if self.is_youtube_url(raw_input):
-            info = await self.ytdl_extract(raw_input, search=False)
+            try:
+                info = await self.ytdl_extract(raw_input, search=False)
+            except Exception as e:
+                msg = str(e)
+                if "Sign in to confirm you're not a bot" in msg:
+                    raise RuntimeError(
+                        "YouTube blocked that request. Add YTDLP_COOKIES and try again."
+                    )
+                raise RuntimeError("I couldn't read that YouTube link.")
+
             if info.get("entries"):
                 items: list[QueueItem] = []
                 for entry in info["entries"]:
@@ -266,6 +326,7 @@ class Music(commands.Cog):
                         items.append(built)
                 if items:
                     return items
+
             item = self.queue_item_from_info(info, requested_by)
             if not item:
                 raise RuntimeError("I couldn't read that YouTube link.")
@@ -275,9 +336,14 @@ class Music(commands.Cog):
             query = await self.spotify_track_to_search(raw_input)
             if not query:
                 raise RuntimeError(
-                    "That Spotify link couldn't be used. v1 only supports normal Spotify track links."
+                    "That Spotify link couldn't be used. v1 supports Spotify track links, not playlists/albums."
                 )
-            info = await self.ytdl_extract(query, search=True)
+
+            try:
+                info = await self.ytdl_extract(query, search=True)
+            except Exception:
+                raise RuntimeError("I couldn't find a playable YouTube match for that Spotify track.")
+
             item = self.queue_item_from_info(info, requested_by)
             if not item:
                 raise RuntimeError("I found no playable match for that Spotify track.")
@@ -289,6 +355,7 @@ class Music(commands.Cog):
         state = self.state_for(guild.id)
         vc = state.voice_client or guild.voice_client
         state.voice_client = vc
+
         if not vc or not vc.is_connected():
             state.reset()
             return
@@ -321,7 +388,11 @@ class Music(commands.Cog):
 
         channel = guild.get_channel(state.text_channel_id or MUSIC_TEXT_CHANNEL_ID)
         if isinstance(channel, discord.TextChannel):
-            desc = f"**{discord.utils.escape_markdown(next_item.title)}**\nRequested by {next_item.requested_by}"
+            desc = f"**{discord.utils.escape_markdown(next_item.title)}**"
+            duration_text = format_duration(next_item.duration)
+            if duration_text:
+                desc += f"\nDuration: {duration_text}"
+            desc += f"\nRequested by {next_item.requested_by}"
             if next_item.webpage_url:
                 desc += f"\n{next_item.webpage_url}"
             await self.send_embed(channel, "Now playing", desc)
@@ -360,11 +431,11 @@ class Music(commands.Cog):
             state.queue.extend(items)
 
             if len(items) == 1:
-                await self.send_embed(
-                    ctx.channel,
-                    "Queued",
-                    f"**{discord.utils.escape_markdown(items[0].title)}**\nRequested by {ctx.author.mention}",
-                )
+                duration_text = format_duration(items[0].duration)
+                desc = f"**{discord.utils.escape_markdown(items[0].title)}**\nRequested by {ctx.author.mention}"
+                if duration_text:
+                    desc += f"\nDuration: {duration_text}"
+                await self.send_embed(ctx.channel, "Queued", desc)
             else:
                 await self.send_embed(
                     ctx.channel,
@@ -433,14 +504,25 @@ class Music(commands.Cog):
 
         state = self.state_for(ctx.guild.id)
         lines: list[str] = []
+
         if state.current:
-            lines.append(f"**Now:** {discord.utils.escape_markdown(state.current.title)}")
+            now_line = f"**Now:** {discord.utils.escape_markdown(state.current.title)}"
+            now_duration = format_duration(state.current.duration)
+            if now_duration:
+                now_line += f" ({now_duration})"
+            lines.append(now_line)
+
         if state.queue:
             preview = state.queue[:10]
-            lines.append("")
+            if lines:
+                lines.append("")
             lines.append("**Up next:**")
             for idx, item in enumerate(preview, start=1):
-                lines.append(f"{idx}. {discord.utils.escape_markdown(item.title)}")
+                line = f"{idx}. {discord.utils.escape_markdown(item.title)}"
+                duration_text = format_duration(item.duration)
+                if duration_text:
+                    line += f" ({duration_text})"
+                lines.append(line)
             if len(state.queue) > 10:
                 lines.append(f"…and **{len(state.queue) - 10}** more.")
 
@@ -506,3 +588,13 @@ def html_unescape(text: str) -> str:
         .replace("&lt;", "<")
         .replace("&gt;", ">")
     )
+
+
+def format_duration(seconds: Optional[int]) -> str:
+    if not seconds or seconds < 0:
+        return ""
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02}:{sec:02}"
+    return f"{minutes}:{sec:02}"
