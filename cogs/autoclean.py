@@ -12,8 +12,12 @@ import config
 # —— CONFIG ————————————————————————————————————————
 AUTODELETE_SECONDS: Final[int] = 6
 
+# Hardcoded extra exempt channels
+MUSIC_CHANNEL_ID: Final[int] = 1441863803011727380
+
 # Channels you want to EXEMPT from any auto-deletion
 EXEMPT_CHANNEL_IDS: set[int] = set(getattr(config, "AUTO_CLEAN_EXEMPT_CHANNEL_IDS", []))
+EXEMPT_CHANNEL_IDS.add(MUSIC_CHANNEL_ID)
 
 # Categories to exempt (optional)
 EXEMPT_CATEGORY_IDS: set[int] = set()
