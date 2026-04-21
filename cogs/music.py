@@ -18,6 +18,7 @@ import yt_dlp
 
 LOG = logging.getLogger(__name__)
 
+# ── CONFIG ─────────────────────────────────────────────────────────
 MUSIC_TEXT_CHANNEL_ID = 1441863803011727380
 EMBED_COLOR = 0x5865F2
 FFMPEG_BEFORE_OPTIONS = "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -57,7 +58,6 @@ SPOTIFY_HOSTS = (
     "play.spotify.com",
     "spotify.link",
 )
-
 SPOTIFY_TRACK_RE = re.compile(r"spotify\.com/track/([A-Za-z0-9]+)", re.IGNORECASE)
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -87,6 +87,8 @@ class GuildMusicState:
 
 
 class Music(commands.Cog):
+    """Prefix-only music cog locked to the music channel."""
+
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.states: dict[int, GuildMusicState] = {}
@@ -119,9 +121,10 @@ class Music(commands.Cog):
             suffix = key.removeprefix("YTDLP_COOKIES_B64_")
             if not suffix.isdigit():
                 continue
-            if not value.strip():
+            value = value.strip()
+            if not value:
                 continue
-            chunks.append((int(suffix), value.strip()))
+            chunks.append((int(suffix), value))
 
         if not chunks:
             return ""
@@ -265,6 +268,7 @@ class Music(commands.Cog):
             return url
 
     async def spotify_track_to_search(self, url: str) -> Optional[str]:
+        """Best-effort Spotify track metadata fetch without extra dependencies."""
         if not self.session:
             return None
 
