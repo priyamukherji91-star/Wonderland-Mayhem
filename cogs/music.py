@@ -108,17 +108,40 @@ class Music(commands.Cog):
         if self.session and not self.session.closed:
             await self.session.close()
 
-    def prepare_cookie_file(self) -> Optional[str]:
+    def get_chunked_cookie_b64(self) -> str:
         if YTDLP_COOKIES_B64_ENV:
+            return YTDLP_COOKIES_B64_ENV
+
+        chunks: list[tuple[int, str]] = []
+        for key, value in os.environ.items():
+            if not key.startswith("YTDLP_COOKIES_B64_"):
+                continue
+            suffix = key.removeprefix("YTDLP_COOKIES_B64_")
+            if not suffix.isdigit():
+                continue
+            if not value.strip():
+                continue
+            chunks.append((int(suffix), value.strip()))
+
+        if not chunks:
+            return ""
+
+        chunks.sort(key=lambda x: x[0])
+        return "".join(value for _, value in chunks)
+
+    def prepare_cookie_file(self) -> Optional[str]:
+        cookie_b64 = self.get_chunked_cookie_b64()
+
+        if cookie_b64:
             try:
                 os.makedirs("/app/data", exist_ok=True)
-                raw = base64.b64decode(YTDLP_COOKIES_B64_ENV)
+                raw = base64.b64decode(cookie_b64)
                 with open(AUTO_COOKIE_PATH, "wb") as f:
                     f.write(raw)
-                LOG.info("Music: wrote cookies file from YTDLP_COOKIES_B64 to %s", AUTO_COOKIE_PATH)
+                LOG.info("Music: wrote cookies file from base64 env vars to %s", AUTO_COOKIE_PATH)
                 return AUTO_COOKIE_PATH
             except (binascii.Error, OSError):
-                LOG.exception("Music: failed to decode/write YTDLP_COOKIES_B64")
+                LOG.exception("Music: failed to decode/write cookie base64 env vars")
                 return None
 
         if YTDLP_COOKIES_ENV:
