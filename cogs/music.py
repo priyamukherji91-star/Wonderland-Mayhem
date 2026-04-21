@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import re
@@ -16,12 +18,14 @@ import yt_dlp
 
 LOG = logging.getLogger(__name__)
 
-# ── CONFIG ─────────────────────────────────────────────────────────
 MUSIC_TEXT_CHANNEL_ID = 1441863803011727380
 EMBED_COLOR = 0x5865F2
 FFMPEG_BEFORE_OPTIONS = "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"
-YTDLP_COOKIES = os.getenv("YTDLP_COOKIES", "").strip() or None
+
+YTDLP_COOKIES_ENV = os.getenv("YTDLP_COOKIES", "").strip()
+YTDLP_COOKIES_B64_ENV = os.getenv("YTDLP_COOKIES_B64", "").strip()
+AUTO_COOKIE_PATH = "/app/data/cookies.txt"
 
 YTDL_BASE_OPTS = {
     "format": "bestaudio/best",
@@ -83,15 +87,15 @@ class GuildMusicState:
 
 
 class Music(commands.Cog):
-    """Prefix-only music cog locked to the music channel."""
-
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.states: dict[int, GuildMusicState] = {}
         self.session: Optional[aiohttp.ClientSession] = None
+        self.cookiefile_path: Optional[str] = None
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession()
+        self.cookiefile_path = self.prepare_cookie_file()
 
     async def cog_unload(self) -> None:
         for state in self.states.values():
@@ -103,6 +107,24 @@ class Music(commands.Cog):
                     pass
         if self.session and not self.session.closed:
             await self.session.close()
+
+    def prepare_cookie_file(self) -> Optional[str]:
+        if YTDLP_COOKIES_B64_ENV:
+            try:
+                os.makedirs("/app/data", exist_ok=True)
+                raw = base64.b64decode(YTDLP_COOKIES_B64_ENV)
+                with open(AUTO_COOKIE_PATH, "wb") as f:
+                    f.write(raw)
+                LOG.info("Music: wrote cookies file from YTDLP_COOKIES_B64 to %s", AUTO_COOKIE_PATH)
+                return AUTO_COOKIE_PATH
+            except (binascii.Error, OSError):
+                LOG.exception("Music: failed to decode/write YTDLP_COOKIES_B64")
+                return None
+
+        if YTDLP_COOKIES_ENV:
+            return YTDLP_COOKIES_ENV
+
+        return None
 
     def state_for(self, guild_id: int) -> GuildMusicState:
         return self.states.setdefault(guild_id, GuildMusicState())
@@ -165,8 +187,8 @@ class Music(commands.Cog):
     async def ytdl_extract(self, query: str, *, search: bool = False) -> dict:
         opts = dict(YTDL_BASE_OPTS)
 
-        if YTDLP_COOKIES:
-            opts["cookiefile"] = YTDLP_COOKIES
+        if self.cookiefile_path:
+            opts["cookiefile"] = self.cookiefile_path
 
         if search:
             target = f"ytsearch1:{query}"
@@ -196,9 +218,6 @@ class Music(commands.Cog):
         return any(host == h or host.endswith(f".{h}") for h in SPOTIFY_HOSTS)
 
     async def resolve_spotify_url(self, url: str) -> str:
-        """
-        Follow Spotify share links / redirects and return the final URL if possible.
-        """
         if not self.session:
             return url
 
@@ -223,10 +242,6 @@ class Music(commands.Cog):
             return url
 
     async def spotify_track_to_search(self, url: str) -> Optional[str]:
-        """
-        Best-effort Spotify track metadata fetch without extra dependencies.
-        v1 supports TRACK links only.
-        """
         if not self.session:
             return None
 
@@ -312,10 +327,8 @@ class Music(commands.Cog):
                 info = await self.ytdl_extract(raw_input, search=False)
             except Exception as e:
                 msg = str(e)
-                if "Sign in to confirm you're not a bot" in msg:
-                    raise RuntimeError(
-                        "YouTube blocked that request. Add YTDLP_COOKIES and try again."
-                    )
+                if "Sign in to confirm you’re not a bot" in msg or "Sign in to confirm you're not a bot" in msg:
+                    raise RuntimeError("YouTube blocked that request. Cookies are still missing or invalid.")
                 raise RuntimeError("I couldn't read that YouTube link.")
 
             if info.get("entries"):
